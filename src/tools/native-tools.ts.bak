@@ -1,0 +1,270 @@
+import { z } from 'zod';
+import { SchemaFirstToolRegistry } from './registry.js';
+
+// Example native tools demonstrating schema-first approach
+
+export function registerNativeTools(registry: SchemaFirstToolRegistry): void {
+  // Data processing tools
+  registry.register({
+    id: 'data.transform',
+    name: 'transform',
+    namespace: 'data',
+    description: 'Transform array data using JSONPath-like operations',
+    inputSchema: z.object({
+      data: z.array(z.any()),
+      operation: z.enum(['filter', 'map', 'reduce', 'sort']),
+      expression: z.string().describe('JavaScript expression for the operation'),
+      key: z.string().optional().describe('Key to operate on for objects')
+    }),
+    outputSchema: z.array(z.any()),
+    handler: async ({ data, operation, expression, key }) => {
+      const fn = new Function('item', 'index', 'array', `return ${expression}`);
+
+      switch (operation) {
+        case 'filter':
+          return data.filter(fn);
+        case 'map':
+          return data.map(fn);
+        case 'sort':
+          return data.sort((a, b) => {
+            const aVal = key ? a[key] : a;
+            const bVal = key ? b[key] : b;
+            return aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+          });
+        case 'reduce':
+          return [data.reduce(fn)];
+        default:
+          return data;
+      }
+    },
+    metadata: {
+      tags: ['data', 'processing', 'array'],
+      version: '1.0.0'
+    }
+  });
+
+  // Text processing tools
+  registry.register({
+    id: 'text.analyze',
+    name: 'analyze',
+    namespace: 'text',
+    description: 'Analyze text for word count, sentiment, and readability',
+    inputSchema: z.object({
+      text: z.string().min(1),
+      metrics: z.array(z.enum(['wordCount', 'charCount', 'sentenceCount', 'readability'])).default(['wordCount'])
+    }),
+    outputSchema: z.object({
+      wordCount: z.number().optional(),
+      charCount: z.number().optional(),
+      sentenceCount: z.number().optional(),
+      readability: z.number().optional(),
+      text: z.string()
+    }),
+    handler: async ({ text, metrics }) => {
+      const result: any = { text };
+
+      if (metrics.includes('wordCount')) {
+        result.wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+      }
+
+      if (metrics.includes('charCount')) {
+        result.charCount = text.length;
+      }
+
+      if (metrics.includes('sentenceCount')) {
+        result.sentenceCount = text.split(/[.!?]+/).filter(s => s.trim().length > 0).length;
+      }
+
+      if (metrics.includes('readability')) {
+        // Simple Flesch Reading Ease approximation
+        const words = result.wordCount || text.split(/\s+/).length;
+        const sentences = result.sentenceCount || text.split(/[.!?]+/).length;
+        const syllables = text.toLowerCase().match(/[aeiouy]+/g)?.length || 0;
+
+        if (sentences > 0 && words > 0) {
+          result.readability = Math.round(
+            206.835 - (1.015 * (words / sentences)) - (84.6 * (syllables / words))
+          );
+        }
+      }
+
+      return result;
+    },
+    metadata: {
+      tags: ['text', 'analysis', 'nlp'],
+      version: '1.0.0'
+    }
+  });
+
+  // Math tools
+  registry.register({
+    id: 'math.calculate',
+    name: 'calculate',
+    namespace: 'math',
+    description: 'Perform mathematical calculations safely',
+    inputSchema: z.object({
+      expression: z.string().describe('Mathematical expression (e.g., "2 + 3 * 4")'),
+      precision: z.number().min(0).max(15).default(2).describe('Decimal precision for results')
+    }),
+    outputSchema: z.object({
+      result: z.number(),
+      expression: z.string(),
+      precision: z.number()
+    }),
+    handler: async ({ expression, precision }) => {
+      // Sanitize expression to only allow safe math operations
+      const sanitized = expression.replace(/[^0-9+\-*/.() ]/g, '');
+
+      if (sanitized !== expression) {
+        throw new Error('Expression contains invalid characters');
+      }
+
+      try {
+        // Use Function constructor for safe evaluation
+        const result = new Function(`return ${sanitized}`)();
+
+        if (typeof result !== 'number' || !isFinite(result)) {
+          throw new Error('Invalid mathematical result');
+        }
+
+        return {
+          result: Number(result.toFixed(precision)),
+          expression: sanitized,
+          precision
+        };
+      } catch (error) {
+        throw new Error(`Math calculation failed: ${error.message}`);
+      }
+    },
+    metadata: {
+      tags: ['math', 'calculation', 'utility'],
+      version: '1.0.0'
+    }
+  });
+
+  // Date/time tools
+  registry.register({
+    id: 'datetime.format',
+    name: 'format',
+    namespace: 'datetime',
+    description: 'Format dates and times in various formats',
+    inputSchema: z.object({
+      date: z.union([z.string(), z.number(), z.date()]).describe('Date to format (ISO string, timestamp, or Date object)'),
+      format: z.enum(['iso', 'local', 'utc', 'timestamp', 'relative']).default('iso'),
+      timezone: z.string().optional().describe('Timezone (e.g., "America/New_York")')
+    }),
+    outputSchema: z.object({
+      formatted: z.string(),
+      original: z.union([z.string(), z.number()]),
+      format: z.string(),
+      timezone: z.string().optional()
+    }),
+    handler: async ({ date, format, timezone }) => {
+      const dateObj = new Date(date);
+
+      if (isNaN(dateObj.getTime())) {
+        throw new Error('Invalid date provided');
+      }
+
+      let formatted: string;
+      const original = typeof date === 'object' ? date.getTime() : date;
+
+      switch (format) {
+        case 'iso':
+          formatted = dateObj.toISOString();
+          break;
+        case 'local':
+          formatted = dateObj.toLocaleString(undefined, timezone ? { timeZone: timezone } : undefined);
+          break;
+        case 'utc':
+          formatted = dateObj.toUTCString();
+          break;
+        case 'timestamp':
+          formatted = dateObj.getTime().toString();
+          break;
+        case 'relative':
+          const now = new Date();
+          const diff = now.getTime() - dateObj.getTime();
+          const seconds = Math.floor(diff / 1000);
+          const minutes = Math.floor(seconds / 60);
+          const hours = Math.floor(minutes / 60);
+          const days = Math.floor(hours / 24);
+
+          if (days > 0) {
+            formatted = `${days} day${days === 1 ? '' : 's'} ago`;
+          } else if (hours > 0) {
+            formatted = `${hours} hour${hours === 1 ? '' : 's'} ago`;
+          } else if (minutes > 0) {
+            formatted = `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+          } else {
+            formatted = `${seconds} second${seconds === 1 ? '' : 's'} ago`;
+          }
+          break;
+        default:
+          formatted = dateObj.toISOString();
+      }
+
+      return {
+        formatted,
+        original,
+        format,
+        timezone
+      };
+    },
+    metadata: {
+      tags: ['datetime', 'formatting', 'utility'],
+      version: '1.0.0'
+    }
+  });
+
+  // Utility tools
+  registry.register({
+    id: 'util.uuid',
+    name: 'uuid',
+    namespace: 'util',
+    description: 'Generate UUIDs in various formats',
+    inputSchema: z.object({
+      version: z.enum(['v4']).default('v4'),
+      count: z.number().min(1).max(100).default(1).describe('Number of UUIDs to generate')
+    }),
+    outputSchema: z.object({
+      uuids: z.array(z.string()),
+      version: z.string(),
+      count: z.number()
+    }),
+    handler: async ({ version, count }) => {
+      const uuids: string[] = [];
+
+      for (let i = 0; i < count; i++) {
+        if (version === 'v4') {
+          // Simple UUID v4 generation
+          const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+          });
+          uuids.push(uuid);
+        }
+      }
+
+      return {
+        uuids,
+        version,
+        count
+      };
+    },
+    metadata: {
+      tags: ['utility', 'uuid', 'generation'],
+      version: '1.0.0'
+    }
+  });
+
+  console.log('✅ Native tools registered successfully');
+}
+
+// Create and initialize default registry
+export function createNativeToolsRegistry(): SchemaFirstToolRegistry {
+  const registry = new SchemaFirstToolRegistry();
+  registerNativeTools(registry);
+  return registry;
+}

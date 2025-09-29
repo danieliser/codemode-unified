@@ -1,0 +1,334 @@
+import { z } from 'zod';
+import type {
+  UnifiedTool,
+  ToolMetadata,
+  ToolRegistry as BaseToolRegistry
+} from '../types/core.js';
+
+export interface ToolDefinition<TInput = any, TOutput = any> {
+  id: string;
+  name: string;
+  description: string;
+  namespace: string;
+  inputSchema: z.ZodSchema<TInput>;
+  outputSchema?: z.ZodSchema<TOutput>;
+  handler: (args: TInput) => Promise<TOutput>;
+  metadata?: Partial<ToolMetadata>;
+}
+
+export interface RegisteredTool extends UnifiedTool {
+  handler: (args: any) => Promise<any>;
+  isNative: boolean;
+}
+
+export class SchemaFirstToolRegistry {
+  private tools: Map<string, RegisteredTool> = new Map();
+  private namespaces: Map<string, Set<string>> = new Map();
+
+  register<TInput, TOutput>(definition: ToolDefinition<TInput, TOutput>): void {
+    const fullName = `${definition.namespace}.${definition.name}`;
+
+    if (this.tools.has(fullName)) {
+      throw new Error(`Tool ${fullName} is already registered`);
+    }
+
+    const tool: RegisteredTool = {
+      id: definition.id,
+      name: definition.name,
+      description: definition.description,
+      namespace: definition.namespace,
+      inputSchema: definition.inputSchema,
+      outputSchema: definition.outputSchema,
+      execute: this.createExecuteWrapper(definition),
+      handler: definition.handler,
+      isNative: true,
+      metadata: {
+        source: 'native',
+        version: '1.0.0',
+        tags: [],
+        ...definition.metadata
+      }
+    };
+
+    this.tools.set(fullName, tool);
+
+    // Update namespace tracking
+    if (!this.namespaces.has(definition.namespace)) {
+      this.namespaces.set(definition.namespace, new Set());
+    }
+    this.namespaces.get(definition.namespace)!.add(definition.name);
+
+    console.log(`✅ Registered native tool: ${fullName}`);
+  }
+
+  private createExecuteWrapper<TInput, TOutput>(
+    definition: ToolDefinition<TInput, TOutput>
+  ) {
+    return async (args: unknown): Promise<TOutput> => {
+      // Validate input with Zod schema
+      try {
+        const validatedInput = definition.inputSchema.parse(args);
+        const result = await definition.handler(validatedInput);
+
+        // Validate output if schema is provided
+        if (definition.outputSchema) {
+          return definition.outputSchema.parse(result);
+        }
+
+        return result;
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          throw new Error(`Validation error for ${definition.namespace}.${definition.name}: ${this.formatZodError(error)}`);
+        }
+        throw error;
+      }
+    };
+  }
+
+  private formatZodError(error: z.ZodError): string {
+    return error.errors
+      .map(err => `${err.path.join('.')}: ${err.message}`)
+      .join(', ');
+  }
+
+  get(fullName: string): RegisteredTool | undefined {
+    return this.tools.get(fullName);
+  }
+
+  getByNamespace(namespace: string): RegisteredTool[] {
+    const toolNames = this.namespaces.get(namespace);
+    if (!toolNames) return [];
+
+    return Array.from(toolNames)
+      .map(name => this.tools.get(`${namespace}.${name}`))
+      .filter((tool): tool is RegisteredTool => tool !== undefined);
+  }
+
+  list(): RegisteredTool[] {
+    return Array.from(this.tools.values());
+  }
+
+  listNamespaces(): string[] {
+    return Array.from(this.namespaces.keys());
+  }
+
+  unregister(fullName: string): boolean {
+    const tool = this.tools.get(fullName);
+    if (!tool) return false;
+
+    this.tools.delete(fullName);
+
+    // Update namespace tracking
+    const toolNames = this.namespaces.get(tool.namespace);
+    if (toolNames) {
+      toolNames.delete(tool.name);
+      if (toolNames.size === 0) {
+        this.namespaces.delete(tool.namespace);
+      }
+    }
+
+    console.log(`🗑️  Unregistered tool: ${fullName}`);
+    return true;
+  }
+
+  // Execute a tool by name with automatic validation
+  async execute(fullName: string, args: unknown): Promise<unknown> {
+    const tool = this.tools.get(fullName);
+    if (!tool) {
+      throw new Error(`Tool ${fullName} not found`);
+    }
+
+    return tool.execute(args);
+  }
+
+  // Generate TypeScript definitions for all registered tools
+  generateTypeDefinitions(): string {
+    const toolsByNamespace = new Map<string, RegisteredTool[]>();
+
+    // Group tools by namespace
+    for (const tool of this.tools.values()) {
+      if (!toolsByNamespace.has(tool.namespace)) {
+        toolsByNamespace.set(tool.namespace, []);
+      }
+      toolsByNamespace.get(tool.namespace)!.push(tool);
+    }
+
+    const typeDefinitions: string[] = [];
+
+    // Generate types for each namespace
+    for (const [namespace, tools] of toolsByNamespace) {
+      const interfaceLines: string[] = [];
+
+      for (const tool of tools) {
+        const inputType = this.zodSchemaToTypeScript(tool.inputSchema);
+        const outputType = tool.outputSchema
+          ? this.zodSchemaToTypeScript(tool.outputSchema)
+          : 'unknown';
+
+        interfaceLines.push(`
+  /**
+   * ${tool.description}
+   */
+  ${tool.name}(args: ${inputType}): Promise<${outputType}>;`);
+      }
+
+      typeDefinitions.push(`
+interface ${this.pascalCase(namespace)}Tools {${interfaceLines.join('')}
+}`);
+    }
+
+    const mainInterface = `
+interface NativeToolsRegistry {
+${Array.from(toolsByNamespace.keys())
+  .map(ns => `  ${ns}: ${this.pascalCase(ns)}Tools;`)
+  .join('\n')}
+}
+
+declare global {
+  const tools: NativeToolsRegistry;
+}`;
+
+    return typeDefinitions.join('\n') + '\n' + mainInterface;
+  }
+
+  // Basic Zod to TypeScript type conversion
+  private zodSchemaToTypeScript(schema: z.ZodSchema): string {
+    // This is a simplified conversion - in a real implementation,
+    // you might want to use a more sophisticated Zod-to-TypeScript library
+    const schemaType = schema._def.typeName;
+
+    switch (schemaType) {
+      case 'ZodString':
+        return 'string';
+      case 'ZodNumber':
+        return 'number';
+      case 'ZodBoolean':
+        return 'boolean';
+      case 'ZodArray':
+        const innerType = this.zodSchemaToTypeScript((schema as z.ZodArray<any>).element);
+        return `${innerType}[]`;
+      case 'ZodObject':
+        const shape = (schema as z.ZodObject<any>).shape;
+        const properties: string[] = [];
+
+        for (const [key, value] of Object.entries(shape)) {
+          const propType = this.zodSchemaToTypeScript(value as z.ZodSchema);
+          const optional = (value as any).isOptional?.() ? '?' : '';
+          properties.push(`${key}${optional}: ${propType}`);
+        }
+
+        return `{ ${properties.join('; ')} }`;
+      case 'ZodOptional':
+        return this.zodSchemaToTypeScript((schema as z.ZodOptional<any>).unwrap());
+      case 'ZodUnion':
+        const types = (schema as z.ZodUnion<any>).options.map((opt: z.ZodSchema) =>
+          this.zodSchemaToTypeScript(opt)
+        );
+        return types.join(' | ');
+      default:
+        return 'unknown';
+    }
+  }
+
+  private pascalCase(str: string): string {
+    return str.replace(/[-_](.)/g, (_, char) => char.toUpperCase())
+              .replace(/^./, char => char.toUpperCase());
+  }
+
+  // Create a runtime injection for the sandbox
+  createSandboxInjection(): string {
+    const toolsByNamespace = new Map<string, RegisteredTool[]>();
+
+    // Group tools by namespace
+    for (const tool of this.tools.values()) {
+      if (!toolsByNamespace.has(tool.namespace)) {
+        toolsByNamespace.set(tool.namespace, []);
+      }
+      toolsByNamespace.get(tool.namespace)!.push(tool);
+    }
+
+    const namespaceObjects: string[] = [];
+
+    for (const [namespace, tools] of toolsByNamespace) {
+      const toolMethods = tools.map(tool => `
+    async ${tool.name}(args) {
+      return await window.__toolRegistry.execute('${tool.namespace}.${tool.name}', args);
+    }`).join(',\n');
+
+      namespaceObjects.push(`
+  ${namespace}: {${toolMethods}
+  }`);
+    }
+
+    return `
+// Native Tools Runtime for Sandbox
+globalThis.tools = {${namespaceObjects.join(',\n')}
+};
+
+// Tool execution helper
+globalThis.__executeNativeTool = async function(fullName, args) {
+  return await window.__toolRegistry.execute(fullName, args);
+};
+`;
+  }
+
+  // Get tool documentation
+  getDocumentation(): { namespace: string; tools: { name: string; description: string; inputSchema: any; outputSchema?: any }[] }[] {
+    const toolsByNamespace = new Map<string, RegisteredTool[]>();
+
+    for (const tool of this.tools.values()) {
+      if (!toolsByNamespace.has(tool.namespace)) {
+        toolsByNamespace.set(tool.namespace, []);
+      }
+      toolsByNamespace.get(tool.namespace)!.push(tool);
+    }
+
+    return Array.from(toolsByNamespace.entries()).map(([namespace, tools]) => ({
+      namespace,
+      tools: tools.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: this.zodSchemaToJson(tool.inputSchema),
+        outputSchema: tool.outputSchema ? this.zodSchemaToJson(tool.outputSchema) : undefined
+      }))
+    }));
+  }
+
+  private zodSchemaToJson(schema: z.ZodSchema): any {
+    // Convert Zod schema to JSON Schema-like object for documentation
+    const schemaType = schema._def.typeName;
+
+    switch (schemaType) {
+      case 'ZodString':
+        return { type: 'string' };
+      case 'ZodNumber':
+        return { type: 'number' };
+      case 'ZodBoolean':
+        return { type: 'boolean' };
+      case 'ZodArray':
+        return {
+          type: 'array',
+          items: this.zodSchemaToJson((schema as z.ZodArray<any>).element)
+        };
+      case 'ZodObject':
+        const shape = (schema as z.ZodObject<any>).shape;
+        const properties: any = {};
+        const required: string[] = [];
+
+        for (const [key, value] of Object.entries(shape)) {
+          properties[key] = this.zodSchemaToJson(value as z.ZodSchema);
+          if (!(value as any).isOptional?.()) {
+            required.push(key);
+          }
+        }
+
+        return {
+          type: 'object',
+          properties,
+          required: required.length > 0 ? required : undefined
+        };
+      default:
+        return { type: 'unknown' };
+    }
+  }
+}

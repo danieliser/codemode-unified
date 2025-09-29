@@ -1,0 +1,556 @@
+import { EventEmitter } from 'events';
+import { OAuth2Handler } from './oauth-handler.js';
+import { JWTHandler } from './jwt-handler.js';
+import type {
+  AuthContext,
+  CapabilitySet
+} from '../types/core.js';
+
+export interface AuthConfig {
+  provider: 'oauth2' | 'jwt' | 'api-key';
+  jwt?: {
+    issuer: string;
+    audience: string;
+    secretKey?: string;
+    privateKey?: string;
+    publicKey?: string;
+    algorithm: 'HS256' | 'RS256';
+    expirationTime: number;
+  };
+  oauth2?: {
+    clientId: string;
+    clientSecret?: string;
+    redirectUri: string;
+    authorizationEndpoint: string;
+    tokenEndpoint: string;
+    userInfoEndpoint?: string;
+    scope: string[];
+  };
+  apiKeys?: {
+    enabled: boolean;
+    defaultScopes: string[];
+    maxExpirationDays: number;
+  };
+}
+
+export interface AuthenticationResult {
+  success: boolean;
+  authContext?: AuthContext;
+  error?: string;
+  redirectUrl?: string; // For OAuth flows
+}
+
+export interface APIKeyInfo {
+  keyId: string;
+  name: string;
+  userId: string;
+  scopes: string[];
+  createdAt: Date;
+  expiresAt: Date;
+  lastUsed?: Date;
+}
+
+export class AuthenticationManager extends EventEmitter {
+  private config: AuthConfig;
+  private jwtHandler?: JWTHandler;
+  private oauthHandler?: OAuth2Handler;
+  private activeSessions: Map<string, AuthContext> = new Map();
+  private apiKeys: Map<string, APIKeyInfo> = new Map();
+
+  constructor(config: AuthConfig) {
+    super();
+    this.config = config;
+    this.initializeHandlers();
+  }
+
+  private initializeHandlers(): void {
+    // Initialize JWT handler if configured
+    if (this.config.jwt) {
+      this.jwtHandler = new JWTHandler({
+        issuer: this.config.jwt.issuer,
+        audience: this.config.jwt.audience,
+        secretKey: this.config.jwt.secretKey,
+        privateKey: this.config.jwt.privateKey,
+        publicKey: this.config.jwt.publicKey,
+        algorithm: this.config.jwt.algorithm,
+        expirationTime: this.config.jwt.expirationTime
+      });
+    }
+
+    // Initialize OAuth2 handler if configured
+    if (this.config.oauth2) {
+      this.oauthHandler = new OAuth2Handler({
+        clientId: this.config.oauth2.clientId,
+        clientSecret: this.config.oauth2.clientSecret,
+        redirectUri: this.config.oauth2.redirectUri,
+        authorizationEndpoint: this.config.oauth2.authorizationEndpoint,
+        tokenEndpoint: this.config.oauth2.tokenEndpoint,
+        scope: this.config.oauth2.scope,
+        usePKCE: true // Always use PKCE for OAuth 2.1
+      });
+    }
+  }
+
+  // Start OAuth 2.1 authentication flow
+  async startOAuthFlow(additionalScopes?: string[]): Promise<AuthenticationResult> {
+    if (!this.oauthHandler) {
+      return {
+        success: false,
+        error: 'OAuth not configured'
+      };
+    }
+
+    try {
+      const authRequest = this.oauthHandler.createAuthorizationRequest(additionalScopes);
+
+      return {
+        success: true,
+        redirectUrl: authRequest.authorizationUrl
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Complete OAuth flow with authorization code
+  async completeOAuthFlow(
+    code: string,
+    state: string,
+    receivedState?: string
+  ): Promise<AuthenticationResult> {
+    if (!this.oauthHandler) {
+      return {
+        success: false,
+        error: 'OAuth not configured'
+      };
+    }
+
+    try {
+      // Exchange code for tokens
+      const tokenResponse = await this.oauthHandler.exchangeCodeForTokens(code, state, receivedState);
+
+      // Get user information
+      const userInfo = await this.oauthHandler.getUserInfo(
+        tokenResponse.access_token,
+        this.config.oauth2?.userInfoEndpoint
+      );
+
+      // Create auth context
+      const authContext = this.oauthHandler.createAuthContext(userInfo, tokenResponse);
+
+      // Store session
+      this.activeSessions.set(authContext.sessionId, authContext);
+
+      this.emit('userAuthenticated', authContext);
+
+      return {
+        success: true,
+        authContext
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Authenticate with JWT token
+  async authenticateWithJWT(token: string): Promise<AuthenticationResult> {
+    if (!this.jwtHandler) {
+      return {
+        success: false,
+        error: 'JWT authentication not configured'
+      };
+    }
+
+    try {
+      const verifyResult = await this.jwtHandler.verifyToken(token);
+
+      if (!verifyResult.valid || !verifyResult.authContext) {
+        return {
+          success: false,
+          error: verifyResult.error || 'Invalid token'
+        };
+      }
+
+      // Store session
+      this.activeSessions.set(verifyResult.authContext.sessionId, verifyResult.authContext);
+
+      this.emit('userAuthenticated', verifyResult.authContext);
+
+      return {
+        success: true,
+        authContext: verifyResult.authContext
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Create a new user session with JWT
+  async createUserSession(
+    userId: string,
+    scopes: string[],
+    capabilities?: CapabilitySet,
+    metadata?: Record<string, unknown>
+  ): Promise<AuthenticationResult> {
+    if (!this.jwtHandler) {
+      return {
+        success: false,
+        error: 'JWT not configured'
+      };
+    }
+
+    try {
+      const token = await this.jwtHandler.createToken({
+        userId,
+        scopes,
+        capabilities,
+        metadata
+      });
+
+      const authResult = await this.authenticateWithJWT(token);
+
+      if (authResult.success && authResult.authContext) {
+        // Add the token to metadata for client use
+        authResult.authContext.metadata = {
+          ...authResult.authContext.metadata,
+          accessToken: token
+        };
+      }
+
+      return authResult;
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Create API key
+  async createAPIKey(
+    userId: string,
+    name: string,
+    scopes: string[],
+    expirationDays?: number
+  ): Promise<{ success: boolean; token?: string; keyId?: string; error?: string }> {
+    if (!this.jwtHandler || !this.config.apiKeys?.enabled) {
+      return {
+        success: false,
+        error: 'API keys not configured'
+      };
+    }
+
+    try {
+      const maxDays = this.config.apiKeys.maxExpirationDays;
+      const validExpirationDays = expirationDays && expirationDays <= maxDays ? expirationDays : maxDays;
+
+      const { token, keyId } = await this.jwtHandler.createAPIKey(
+        userId,
+        name,
+        scopes,
+        validExpirationDays
+      );
+
+      // Store API key info
+      const keyInfo: APIKeyInfo = {
+        keyId,
+        name,
+        userId,
+        scopes,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + (validExpirationDays * 24 * 60 * 60 * 1000))
+      };
+
+      this.apiKeys.set(keyId, keyInfo);
+
+      this.emit('apiKeyCreated', keyInfo);
+
+      return {
+        success: true,
+        token,
+        keyId
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Authenticate with API key
+  async authenticateWithAPIKey(token: string): Promise<AuthenticationResult> {
+    if (!this.jwtHandler) {
+      return {
+        success: false,
+        error: 'JWT not configured for API key validation'
+      };
+    }
+
+    try {
+      const validation = await this.jwtHandler.validateAPIKey(token);
+
+      if (!validation.valid || !validation.keyId) {
+        return {
+          success: false,
+          error: 'Invalid API key'
+        };
+      }
+
+      // Update last used time
+      const keyInfo = this.apiKeys.get(validation.keyId);
+      if (keyInfo) {
+        keyInfo.lastUsed = new Date();
+      }
+
+      // Create auth context for API key
+      const authContext: AuthContext = {
+        userId: validation.userId!,
+        sessionId: `api_${validation.keyId}`,
+        scopes: validation.scopes!,
+        capabilities: this.getAPIKeyCapabilities(validation.scopes!),
+        expiresAt: keyInfo?.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000),
+        metadata: {
+          type: 'api_key',
+          keyId: validation.keyId,
+          name: keyInfo?.name
+        }
+      };
+
+      this.emit('apiKeyAuthenticated', authContext);
+
+      return {
+        success: true,
+        authContext
+      };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Refresh tokens
+  async refreshTokens(refreshToken: string): Promise<AuthenticationResult> {
+    if (this.config.provider === 'oauth2' && this.oauthHandler) {
+      try {
+        const tokenResponse = await this.oauthHandler.refreshTokens(refreshToken);
+        const userInfo = await this.oauthHandler.getUserInfo(
+          tokenResponse.access_token,
+          this.config.oauth2?.userInfoEndpoint
+        );
+
+        const authContext = this.oauthHandler.createAuthContext(userInfo, tokenResponse);
+        this.activeSessions.set(authContext.sessionId, authContext);
+
+        return {
+          success: true,
+          authContext
+        };
+      } catch (error: unknown) {
+        return {
+          success: false,
+          error: (error instanceof Error ? error.message : String(error))
+        };
+      }
+    }
+
+    if (this.config.provider === 'jwt' && this.jwtHandler) {
+      try {
+        const tokens = await this.jwtHandler.refreshAccessToken(refreshToken);
+        const authResult = await this.authenticateWithJWT(tokens.accessToken);
+
+        if (authResult.success && authResult.authContext) {
+          authResult.authContext.metadata = {
+            ...authResult.authContext.metadata,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken
+          };
+        }
+
+        return authResult;
+      } catch (error: unknown) {
+        return {
+          success: false,
+          error: (error instanceof Error ? error.message : String(error))
+        };
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Token refresh not supported for current provider'
+    };
+  }
+
+  // Logout user
+  async logout(sessionId: string, token?: string): Promise<void> {
+    // Remove from active sessions
+    this.activeSessions.delete(sessionId);
+
+    // Revoke OAuth tokens if available
+    if (token && this.oauthHandler) {
+      try {
+        await this.oauthHandler.revokeTokens(token);
+      } catch (error: unknown) {
+        console.warn('Failed to revoke OAuth tokens:', (error instanceof Error ? error.message : String(error)));
+      }
+    }
+
+    this.emit('userLoggedOut', sessionId);
+  }
+
+  // Get active session
+  getSession(sessionId: string): AuthContext | null {
+    const session = this.activeSessions.get(sessionId);
+
+    if (session && session.expiresAt > new Date()) {
+      return session;
+    }
+
+    // Remove expired session
+    if (session) {
+      this.activeSessions.delete(sessionId);
+    }
+
+    return null;
+  }
+
+  // List API keys for a user
+  listAPIKeys(userId: string): APIKeyInfo[] {
+    return Array.from(this.apiKeys.values())
+      .filter(key => key.userId === userId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  // Revoke API key
+  revokeAPIKey(keyId: string): boolean {
+    const deleted = this.apiKeys.delete(keyId);
+    if (deleted) {
+      this.emit('apiKeyRevoked', keyId);
+    }
+    return deleted;
+  }
+
+  private getAPIKeyCapabilities(scopes: string[]): CapabilitySet {
+    // Use JWT handler's capability logic if available
+    if (this.jwtHandler) {
+      return (this.jwtHandler as any).getDefaultCapabilities(scopes);
+    }
+
+    // Fallback to minimal capabilities
+    return {
+      network: { allowedHosts: [], allowedPorts: [], maxRequestsPerSecond: 5, maxRequestSize: 1024 * 1024 },
+      filesystem: { allowedPaths: [], readOnly: true, maxFileSize: 0, allowedExtensions: [] },
+      mcp: { allowedServers: ['native'], allowedTools: [], maxCallsPerSecond: 10, maxConcurrentCalls: 3 },
+      system: { allowEnvironmentAccess: false, allowProcessSpawn: false, maxProcesses: 0 }
+    };
+  }
+
+  // Get authentication statistics
+  getAuthStats(): {
+    activeSessions: number;
+    totalAPIKeys: number;
+    recentLogins: number;
+    byProvider: Record<string, number>;
+  } {
+    const now = Date.now();
+    const oneHourAgo = now - (60 * 60 * 1000);
+
+    const activeSessions = this.activeSessions.size;
+    const totalAPIKeys = this.apiKeys.size;
+
+    // Count recent sessions (approximate)
+    const recentLogins = Array.from(this.activeSessions.values())
+      .filter(session => {
+        const createdTime = session.metadata?.['tokenIssuedAt'] as Date;
+        return createdTime && createdTime.getTime() > oneHourAgo;
+      }).length;
+
+    const byProvider: Record<string, number> = {
+      jwt: 0,
+      oauth2: 0,
+      apiKey: 0
+    };
+
+    // Count sessions by type
+    for (const session of this.activeSessions.values()) {
+      if (session.metadata?.['type'] === 'api_key') {
+        byProvider['apiKey']++;
+      } else if (session.metadata?.['tokenIssuer']) {
+        byProvider['jwt']++;
+      } else {
+        byProvider['oauth2']++;
+      }
+    }
+
+    return {
+      activeSessions,
+      totalAPIKeys,
+      recentLogins,
+      byProvider
+    };
+  }
+
+  // Clean up expired sessions and API keys
+  cleanup(): void {
+    const now = new Date();
+
+    // Remove expired sessions
+    for (const [sessionId, session] of this.activeSessions) {
+      if (session.expiresAt <= now) {
+        this.activeSessions.delete(sessionId);
+      }
+    }
+
+    // Remove expired API keys
+    for (const [keyId, keyInfo] of this.apiKeys) {
+      if (keyInfo.expiresAt <= now) {
+        this.apiKeys.delete(keyId);
+        this.emit('apiKeyExpired', keyId);
+      }
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    this.activeSessions.clear();
+    this.apiKeys.clear();
+    this.removeAllListeners();
+  }
+}
+
+// Factory function
+export function createAuthenticationManager(config: AuthConfig): AuthenticationManager {
+  return new AuthenticationManager(config);
+}
+
+// Default authentication configuration
+export const defaultAuthConfig: AuthConfig = {
+  provider: 'jwt',
+  jwt: {
+    issuer: 'code-mode-unified',
+    audience: 'code-execution',
+    secretKey: process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex'),
+    algorithm: 'HS256',
+    expirationTime: 3600 // 1 hour
+  },
+  apiKeys: {
+    enabled: true,
+    defaultScopes: ['code:execute'],
+    maxExpirationDays: 365
+  }
+};
+
+export { OAuth2Handler } from './oauth-handler.js';
+export { JWTHandler } from './jwt-handler.js';
+// AuthenticationResult and APIKeyInfo are already defined in this file

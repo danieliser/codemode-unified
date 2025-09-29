@@ -1,0 +1,197 @@
+import type {
+  ExecutionOptions,
+  ExecutionResult,
+  SandboxConfig,
+  ResourceLimits,
+  SandboxSecurity
+} from '../types/core.js';
+import { QuickJSSandbox } from './quickjs-runtime.js';
+
+export class SandboxManager {
+  private sandbox: QuickJSSandbox;
+  private config: SandboxConfig;
+
+  constructor(config: SandboxConfig) {
+    this.config = config;
+    this.sandbox = new QuickJSSandbox(
+      config.workers.max,
+      config.workers.idleTimeout
+    );
+  }
+
+  async initialize(): Promise<void> {
+    await this.sandbox.initialize();
+  }
+
+  async execute(
+    code: string,
+    options: ExecutionOptions = {}
+  ): Promise<ExecutionResult> {
+    // Merge execution options with sandbox defaults
+    const mergedOptions: ExecutionOptions = {
+      timeout: Math.min(
+        options.timeout || this.config.limits.timeout,
+        this.config.limits.timeout
+      ),
+      memoryLimit: Math.min(
+        options.memoryLimit || this.config.limits.memory,
+        this.config.limits.memory
+      ),
+      typescript: options.typescript ?? true,
+      capabilities: options.capabilities,
+      context: options.context || {}
+    };
+
+    // Validate security constraints
+    this.validateSecurityConstraints(code, mergedOptions);
+
+    // Execute with enhanced error handling
+    try {
+      const result = await this.sandbox.execute(code, mergedOptions);
+
+      // Post-process result for security
+      return this.sanitizeResult(result);
+    } catch (error) {
+      throw this.enhanceError(error, code, mergedOptions);
+    }
+  }
+
+  private validateSecurityConstraints(
+    code: string,
+    options: ExecutionOptions
+  ): void {
+    const security = this.config.security;
+
+    // Check for blocked constructs
+    if (!security.allowEval && /\beval\s*\(/.test(code)) {
+      throw new Error('eval() is not allowed in this sandbox');
+    }
+
+    if (!security.allowFunction && /\bFunction\s*\(/.test(code)) {
+      throw new Error('Function constructor is not allowed in this sandbox');
+    }
+
+    // Check for blocked modules
+    for (const blockedModule of security.blockedModules) {
+      const importRegex = new RegExp(`import.*['"]${blockedModule}['"]|require\\(['"]${blockedModule}['"]\\)`);
+      if (importRegex.test(code)) {
+        throw new Error(`Module '${blockedModule}' is not allowed`);
+      }
+    }
+
+    // Validate memory limits
+    if (options.memoryLimit && options.memoryLimit > this.config.limits.memory) {
+      throw new Error(`Memory limit ${options.memoryLimit} exceeds maximum ${this.config.limits.memory}`);
+    }
+
+    // Validate timeout
+    if (options.timeout && options.timeout > this.config.limits.timeout) {
+      throw new Error(`Timeout ${options.timeout} exceeds maximum ${this.config.limits.timeout}`);
+    }
+  }
+
+  private sanitizeResult(result: ExecutionResult): ExecutionResult {
+    // Remove sensitive information from logs
+    const sanitizedLogs = result.logs.map(log =>
+      this.sanitizeLogMessage(log)
+    );
+
+    return {
+      ...result,
+      logs: sanitizedLogs
+    };
+  }
+
+  private sanitizeLogMessage(message: string): string {
+    // Remove potential sensitive patterns
+    return message
+      .replace(/password[=:]\s*[^\s]+/gi, 'password=***')
+      .replace(/token[=:]\s*[^\s]+/gi, 'token=***')
+      .replace(/api[_-]?key[=:]\s*[^\s]+/gi, 'api_key=***')
+      .replace(/secret[=:]\s*[^\s]+/gi, 'secret=***');
+  }
+
+  private enhanceError(
+    error: unknown,
+    code: string,
+    options: ExecutionOptions
+  ): Error {
+    const baseMessage = error instanceof Error ? error.message : String(error);
+
+    // Add context for debugging
+    const enhancedMessage = `${baseMessage}\n\nExecution context:\n` +
+      `- Timeout: ${options.timeout}ms\n` +
+      `- Memory limit: ${options.memoryLimit} bytes\n` +
+      `- TypeScript: ${options.typescript}\n` +
+      `- Code length: ${code.length} chars`;
+
+    const enhancedError = new Error(enhancedMessage);
+    if (error instanceof Error && error.stack) {
+      enhancedError.stack = error.stack;
+    }
+
+    return enhancedError;
+  }
+
+  async getMetrics() {
+    // Return sandbox metrics
+    return {
+      activeWorkers: 0, // TODO: Implement in QuickJSSandbox
+      queuedRequests: 0,
+      totalExecutions: 0,
+      successfulExecutions: 0,
+      failedExecutions: 0,
+      averageExecutionTime: 0,
+      memoryUsage: {
+        rss: process.memoryUsage().rss,
+        heapTotal: process.memoryUsage().heapTotal,
+        heapUsed: process.memoryUsage().heapUsed,
+        external: process.memoryUsage().external,
+        arrayBuffers: process.memoryUsage().arrayBuffers
+      },
+      uptime: process.uptime()
+    };
+  }
+
+  async shutdown(): Promise<void> {
+    await this.sandbox.shutdown();
+  }
+}
+
+// Factory function for creating sandbox with default config
+export function createSandbox(overrides: Partial<SandboxConfig> = {}): SandboxManager {
+  const defaultConfig: SandboxConfig = {
+    runtime: 'quickjs',
+    workers: {
+      min: 2,
+      max: Math.max(4, Math.ceil(require('os').cpus().length)),
+      idleTimeout: 30000,
+      maxQueueSize: 100,
+      scaling: {
+        enabled: true,
+        scaleUpThreshold: 0.8,
+        scaleDownThreshold: 0.2,
+        cooldownMs: 5000
+      }
+    },
+    limits: {
+      memory: 128 * 1024 * 1024, // 128MB
+      timeout: 30000, // 30 seconds
+      cpuQuota: 0.5, // 50% CPU
+      maxStackSize: 1024 * 1024 // 1MB
+    },
+    security: {
+      allowEval: false,
+      allowFunction: false,
+      allowImports: false,
+      allowedModules: ['zod', 'date-fns'],
+      blockedModules: ['fs', 'child_process', 'cluster', 'crypto', 'os', 'path']
+    }
+  };
+
+  const config = { ...defaultConfig, ...overrides };
+  return new SandboxManager(config);
+}
+
+export { QuickJSSandbox } from './quickjs-runtime.js';
+export type { SandboxWorker } from './quickjs-runtime.js';

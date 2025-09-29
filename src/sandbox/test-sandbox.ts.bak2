@@ -1,0 +1,115 @@
+import { createSandbox } from './index.js';
+
+async function testSandbox() {
+  console.log('🚀 Testing QuickJS Sandbox...\n');
+
+  const sandbox = createSandbox({
+    limits: {
+      memory: 64 * 1024 * 1024, // 64MB for testing
+      timeout: 5000, // 5 seconds
+      cpuQuota: 0.5,
+      maxStackSize: 512 * 1024
+    }
+  });
+
+  try {
+    await sandbox.initialize();
+    console.log('✅ Sandbox initialized successfully');
+
+    // Test 1: Basic execution
+    console.log('\n📝 Test 1: Basic JavaScript execution');
+    const result1 = await sandbox.execute(`
+      const greeting = "Hello from QuickJS!";
+      console.log(greeting);
+      return { message: greeting, timestamp: Date.now() };
+    `);
+    console.log('Result:', result1.result);
+    console.log('Logs:', result1.logs);
+    console.log('Execution time:', result1.metrics.executionTime + 'ms');
+
+    // Test 2: Mathematical operations
+    console.log('\n🔢 Test 2: Mathematical operations');
+    const result2 = await sandbox.execute(`
+      function fibonacci(n) {
+        if (n <= 1) return n;
+        return fibonacci(n - 1) + fibonacci(n - 2);
+      }
+
+      const fib10 = fibonacci(10);
+      console.log('Fibonacci(10):', fib10);
+      return { fibonacci: fib10 };
+    `);
+    console.log('Result:', result2.result);
+    console.log('Execution time:', result2.metrics.executionTime + 'ms');
+
+    // Test 3: JSON processing
+    console.log('\n📊 Test 3: JSON processing');
+    const result3 = await sandbox.execute(`
+      const data = {
+        users: [
+          { name: "Alice", age: 30 },
+          { name: "Bob", age: 25 },
+          { name: "Charlie", age: 35 }
+        ]
+      };
+
+      const adults = data.users.filter(user => user.age >= 30);
+      console.log('Adults:', adults.length);
+
+      return {
+        totalUsers: data.users.length,
+        adults: adults,
+        averageAge: data.users.reduce((sum, user) => sum + user.age, 0) / data.users.length
+      };
+    `);
+    console.log('Result:', result3.result);
+
+    // Test 4: Error handling
+    console.log('\n❌ Test 4: Error handling');
+    try {
+      await sandbox.execute(`
+        throw new Error("Intentional test error");
+      `);
+    } catch (error: unknown) {
+      console.log('Caught expected error:', error.message);
+    }
+
+    // Test 5: Security - blocked eval
+    console.log('\n🛡️ Test 5: Security - blocked eval');
+    try {
+      await sandbox.execute(`
+        eval("console.log('This should not work')");
+      `);
+    } catch (error: unknown) {
+      console.log('Security check passed:', error.message);
+    }
+
+    // Test 6: Timeout handling
+    console.log('\n⏱️ Test 6: Timeout handling');
+    try {
+      await sandbox.execute(`
+        // Infinite loop to test timeout
+        while(true) {
+          // Do nothing
+        }
+      `, { timeout: 1000 });
+    } catch (error: unknown) {
+      console.log('Timeout handled correctly:', error.message);
+    }
+
+    console.log('\n✅ All tests completed successfully!');
+
+  } catch (error: unknown) {
+    console.error('❌ Test failed:', error);
+  } finally {
+    await sandbox.shutdown();
+    console.log('\n🔄 Sandbox shutdown complete');
+  }
+}
+
+// Run tests if this file is executed directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+  testSandbox().catch(console.error);
+}
+
+export { testSandbox };

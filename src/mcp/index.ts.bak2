@@ -1,0 +1,236 @@
+import { MCPAggregator } from './aggregator.js';
+import { APIGenerator } from './api-generator.js';
+import type {
+  MCPServerConfig,
+  ToolRegistry,
+  MCPConfig,
+  ToolInfo,
+  ServerInfo
+} from '../types/core.js';
+
+export class MCPManager {
+  private aggregator: MCPAggregator;
+  private apiGenerator: APIGenerator;
+  private config: MCPConfig;
+  private unifiedAPI: string | null = null;
+  private runtimeAPI: string | null = null;
+
+  constructor(config: MCPConfig) {
+    this.config = config;
+    this.aggregator = new MCPAggregator();
+    this.apiGenerator = new APIGenerator(this.aggregator['registry']);
+
+    // Listen for registry updates to regenerate API
+    this.aggregator.on('registryUpdated', (registry: ToolRegistry) => {
+      this.apiGenerator = new APIGenerator(registry);
+      this.regenerateAPIs();
+    });
+
+    this.aggregator.on('serverConnected', (name: string) => {
+      console.log(`📡 MCP Server connected: ${name}`);
+    });
+
+    this.aggregator.on('serverError', (name: string, error: Error) => {
+      console.error(`❌ MCP Server error ${name}:`, error.message);
+    });
+  }
+
+  async initialize(): Promise<void> {
+    console.log('🚀 Initializing MCP Manager...');
+
+    await this.aggregator.initialize(this.config.servers);
+
+    // Generate initial APIs
+    await this.regenerateAPIs();
+
+    console.log('✅ MCP Manager initialized successfully');
+  }
+
+  private async regenerateAPIs(): Promise<void> {
+    try {
+      console.log('🔄 Regenerating unified APIs...');
+
+      this.unifiedAPI = this.apiGenerator.generateUnifiedAPI();
+      this.runtimeAPI = this.apiGenerator.generateRuntimeAPI();
+
+      console.log('✅ Unified APIs regenerated');
+    } catch (error: unknown) {
+      console.error('❌ Failed to regenerate APIs:', error);
+    }
+  }
+
+  async callTool(namespace: string, args: any): Promise<any> {
+    return this.aggregator.callTool(namespace, args);
+  }
+
+  getAvailableTools(): ToolInfo[] {
+    return this.aggregator.getAvailableTools();
+  }
+
+  getServerStatus(): ServerInfo[] {
+    return this.aggregator.getServerStatus();
+  }
+
+  getToolsByNamespace(namespace: string): ToolInfo[] {
+    return this.aggregator.getToolsByNamespace(namespace);
+  }
+
+  getUnifiedAPI(): string | null {
+    return this.unifiedAPI;
+  }
+
+  getRuntimeAPI(): string | null {
+    return this.runtimeAPI;
+  }
+
+  // Generate TypeScript definitions for the current tool registry
+  generateTypeDefinitions(): string {
+    if (!this.unifiedAPI) {
+      return '// No tools available';
+    }
+
+    const header = `
+// Generated TypeScript definitions for MCP tools
+// Last updated: ${new Date().toISOString()}
+
+declare global {
+  interface MCPGlobal {
+    [namespace: string]: {
+      [toolName: string]: (args?: any) => Promise<any>;
+    };
+  }
+
+  const mcp: MCPGlobal;
+}
+`;
+
+    return header + '\n' + this.unifiedAPI;
+  }
+
+  // Get summary of available tools for documentation
+  getToolsSummary(): { namespace: string; tools: { name: string; description: string }[] }[] {
+    const tools = this.getAvailableTools();
+    const byNamespace = new Map<string, { name: string; description: string }[]>();
+
+    for (const tool of tools) {
+      const [namespace] = tool.namespace.split('.', 1);
+
+      if (!byNamespace.has(namespace)) {
+        byNamespace.set(namespace, []);
+      }
+
+      byNamespace.get(namespace)!.push({
+        name: tool.name,
+        description: tool.description
+      });
+    }
+
+    return Array.from(byNamespace.entries()).map(([namespace, tools]) => ({
+      namespace,
+      tools
+    }));
+  }
+
+  // Create sandbox injection code for runtime
+  createSandboxInjection(): string {
+    const runtimeCode = this.runtimeAPI || '';
+    const toolsSummary = this.getToolsSummary();
+
+    return `
+// MCP Tools Available in Sandbox
+// ${toolsSummary.map(ns =>
+  `${ns.namespace}: ${ns.tools.map(t => t.name).join(', ')}`
+).join('\n// ')}
+
+${runtimeCode}
+
+// Initialize MCP runtime for this execution
+const mcpRuntime = new MCPRuntime(window.__mcpAggregator);
+`;
+  }
+
+  async addServer(name: string, config: MCPServerConfig): Promise<void> {
+    this.config.servers[name] = config;
+
+    // Connect to the new server
+    await this.aggregator['connectServer'](name, config);
+  }
+
+  async removeServer(name: string): Promise<void> {
+    delete this.config.servers[name];
+
+    // Disconnect from the server
+    const connection = this.aggregator['connections'].get(name);
+    if (connection && connection.client && typeof connection.client.close === 'function') {
+      await connection.client.close();
+    }
+
+    this.aggregator['connections'].delete(name);
+    await this.regenerateAPIs();
+  }
+
+  // Health check for all servers
+  async healthCheck(): Promise<{ server: string; status: string; tools: number }[]> {
+    const servers = this.getServerStatus();
+
+    return servers.map(server => ({
+      server: server.name,
+      status: server.status,
+      tools: server.toolCount
+    }));
+  }
+
+  async shutdown(): Promise<void> {
+    console.log('🔄 Shutting down MCP Manager...');
+    await this.aggregator.shutdown();
+    console.log('✅ MCP Manager shutdown complete');
+  }
+}
+
+// Factory function for easy creation
+export function createMCPManager(config: MCPConfig): MCPManager {
+  return new MCPManager(config);
+}
+
+// Default configuration for common MCP servers
+export const defaultMCPConfig: MCPConfig = {
+  servers: {
+    // Example server configurations - replace with actual servers
+    filesystem: {
+      name: 'filesystem',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['@modelcontextprotocol/server-filesystem', '/tmp'],
+      timeout: 30000,
+      retryPolicy: {
+        maxAttempts: 3,
+        backoffMs: 1000,
+        maxBackoffMs: 5000,
+        retryOn: ['ECONNREFUSED', 'TIMEOUT']
+      },
+      healthCheck: {
+        enabled: true,
+        intervalMs: 30000,
+        timeoutMs: 5000,
+        failureThreshold: 3
+      }
+    }
+  },
+  discovery: {
+    enabled: false,
+    intervalMs: 60000,
+    directories: [],
+    filePatterns: ['**/*.mcp.json']
+  },
+  pooling: {
+    maxConnections: 10,
+    idleTimeout: 300000,
+    reconnectAttempts: 3,
+    reconnectDelay: 5000
+  }
+};
+
+export { MCPAggregator } from './aggregator.js';
+export { APIGenerator } from './api-generator.js';
+export type { MCPConnection } from './aggregator.js';
+export type { APIDefinition, APIMethod } from './api-generator.js';

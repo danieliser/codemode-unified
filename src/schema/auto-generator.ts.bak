@@ -1,0 +1,452 @@
+import { EventEmitter } from 'events';
+import { writeFile, mkdir } from 'fs/promises';
+import { join, dirname } from 'path';
+import { SchemaConverter } from './converter.js';
+import type { ToolInfo, ToolRegistry } from '../types/core.js';
+import type { NamespaceSchema, ConversionOptions } from './converter.js';
+
+export interface AutoGeneratorConfig {
+  outputDir: string;
+  watchChanges: boolean;
+  generateOnStartup: boolean;
+  conversionOptions: ConversionOptions;
+  fileNaming: {
+    unified: string;
+    namespace: string;
+    extension: string;
+  };
+  formatting: {
+    prettier: boolean;
+    eslint: boolean;
+  };
+}
+
+export interface GenerationResult {
+  success: boolean;
+  filesGenerated: string[];
+  errors: string[];
+  stats: {
+    namespaces: number;
+    tools: number;
+    lines: number;
+  };
+  duration: number;
+}
+
+export class AutoSchemaGenerator extends EventEmitter {
+  private config: AutoGeneratorConfig;
+  private converter: SchemaConverter;
+  private lastGeneration: Date | null = null;
+  private isGenerating = false;
+  private generationQueue: Array<() => Promise<void>> = [];
+
+  constructor(config: Partial<AutoGeneratorConfig> = {}) {
+    super();
+
+    this.config = {
+      outputDir: './generated/schemas',
+      watchChanges: true,
+      generateOnStartup: true,
+      conversionOptions: {
+        includeOptional: true,
+        generateInterfaces: true,
+        generateRuntime: true,
+        namespaceSeparator: '.',
+        typePrefix: '',
+        indentation: '  '
+      },
+      fileNaming: {
+        unified: 'unified-api',
+        namespace: '{namespace}-api',
+        extension: '.ts'
+      },
+      formatting: {
+        prettier: false,
+        eslint: false
+      },
+      ...config
+    };
+
+    this.converter = new SchemaConverter(this.config.conversionOptions);
+  }
+
+  // Initialize and optionally generate schemas
+  async initialize(toolRegistry?: ToolRegistry): Promise<void> {
+    console.log('🔧 Initializing Auto Schema Generator...');
+
+    // Ensure output directory exists
+    await this.ensureOutputDirectory();
+
+    // Generate on startup if configured
+    if (this.config.generateOnStartup && toolRegistry) {
+      await this.generateSchemas(toolRegistry);
+    }
+
+    console.log('✅ Auto Schema Generator initialized');
+  }
+
+  // Start watching for registry changes
+  startWatching(toolRegistry: ToolRegistry, getRegistryFn: () => ToolRegistry): void {
+    if (!this.config.watchChanges) {
+      return;
+    }
+
+    console.log('👁️  Starting schema generation watcher...');
+
+    // Watch for registry updates (this would typically be connected to MCP aggregator events)
+    setInterval(async () => {
+      const currentRegistry = getRegistryFn();
+      if (this.hasRegistryChanged(currentRegistry)) {
+        console.log('🔄 Tool registry changed, regenerating schemas...');
+        await this.generateSchemas(currentRegistry);
+      }
+    }, 5000); // Check every 5 seconds
+
+    this.emit('watchingStarted');
+  }
+
+  // Generate schemas from tool registry
+  async generateSchemas(toolRegistry: ToolRegistry): Promise<GenerationResult> {
+    if (this.isGenerating) {
+      // Queue the generation
+      return new Promise((resolve) => {
+        this.generationQueue.push(async () => {
+          resolve(await this.generateSchemas(toolRegistry));
+        });
+      });
+    }
+
+    this.isGenerating = true;
+    const startTime = Date.now();
+
+    try {
+      console.log('🚀 Generating TypeScript schemas...');
+
+      // Group tools by namespace
+      const toolsByNamespace = this.groupToolsByNamespace(toolRegistry);
+
+      // Convert each namespace
+      const namespaceSchemas = this.converter.convertToolsByNamespace(toolsByNamespace);
+
+      // Generate files
+      const filesGenerated = await this.writeSchemaFiles(namespaceSchemas);
+
+      // Get generation statistics
+      const stats = this.converter.getConversionStats(namespaceSchemas);
+
+      const duration = Date.now() - startTime;
+      this.lastGeneration = new Date();
+
+      const result: GenerationResult = {
+        success: true,
+        filesGenerated,
+        errors: [],
+        stats: {
+          namespaces: stats.totalNamespaces,
+          tools: stats.totalTools,
+          lines: stats.generatedLines
+        },
+        duration
+      };
+
+      console.log(`✅ Schema generation complete: ${filesGenerated.length} files, ${stats.totalTools} tools, ${duration}ms`);
+
+      this.emit('generationComplete', result);
+
+      return result;
+
+    } catch (error) {
+      const duration = Date.now() - startTime;
+
+      const result: GenerationResult = {
+        success: false,
+        filesGenerated: [],
+        errors: [error.message],
+        stats: { namespaces: 0, tools: 0, lines: 0 },
+        duration
+      };
+
+      console.error('❌ Schema generation failed:', error.message);
+
+      this.emit('generationError', error);
+
+      return result;
+
+    } finally {
+      this.isGenerating = false;
+
+      // Process queued generations
+      if (this.generationQueue.length > 0) {
+        const nextGeneration = this.generationQueue.shift();
+        if (nextGeneration) {
+          setImmediate(() => nextGeneration());
+        }
+      }
+    }
+  }
+
+  private groupToolsByNamespace(toolRegistry: ToolRegistry): Map<string, ToolInfo[]> {
+    const grouped = new Map<string, ToolInfo[]>();
+
+    for (const tool of toolRegistry.tools.values()) {
+      const [namespace] = tool.namespace.split('.', 1);
+
+      if (!grouped.has(namespace)) {
+        grouped.set(namespace, []);
+      }
+
+      grouped.get(namespace)!.push(tool);
+    }
+
+    return grouped;
+  }
+
+  private async writeSchemaFiles(namespaceSchemas: NamespaceSchema[]): Promise<string[]> {
+    const filesGenerated: string[] = [];
+
+    // Generate unified API file
+    const unifiedContent = this.converter.generateUnifiedAPI(namespaceSchemas);
+    const unifiedFile = await this.writeSchemaFile(
+      this.config.fileNaming.unified,
+      unifiedContent
+    );
+    filesGenerated.push(unifiedFile);
+
+    // Generate individual namespace files
+    for (const schema of namespaceSchemas) {
+      const filename = this.config.fileNaming.namespace.replace('{namespace}', schema.namespace);
+      const content = this.converter.generateNamespaceFile(schema.namespace, schema.tools);
+
+      const file = await this.writeSchemaFile(filename, content);
+      filesGenerated.push(file);
+    }
+
+    // Generate index file
+    const indexFile = await this.writeIndexFile(namespaceSchemas);
+    filesGenerated.push(indexFile);
+
+    // Generate types file
+    const typesFile = await this.writeTypesFile();
+    filesGenerated.push(typesFile);
+
+    return filesGenerated;
+  }
+
+  private async writeSchemaFile(filename: string, content: string): Promise<string> {
+    const filepath = join(this.config.outputDir, filename + this.config.fileNaming.extension);
+
+    // Format content if configured
+    const formattedContent = await this.formatContent(content);
+
+    // Add generation header
+    const header = `// This file was automatically generated by Code Mode Unified
+// Generated at: ${new Date().toISOString()}
+// Do not edit manually - changes will be overwritten
+
+`;
+
+    await writeFile(filepath, header + formattedContent, 'utf-8');
+
+    return filepath;
+  }
+
+  private async writeIndexFile(namespaceSchemas: NamespaceSchema[]): Promise<string> {
+    const exports = namespaceSchemas.map(schema => {
+      const className = this.pascalCase(schema.namespace) + 'API';
+      const filename = this.config.fileNaming.namespace.replace('{namespace}', schema.namespace);
+
+      return `export { ${className} } from './${filename}';`;
+    }).join('\n');
+
+    const unifiedExport = `export { createUnifiedMCPAPI } from './${this.config.fileNaming.unified}';`;
+
+    const content = `// Generated index file for all MCP API schemas
+
+${exports}
+${unifiedExport}
+
+// Re-export types
+export type * from './types';
+`;
+
+    return this.writeSchemaFile('index', content);
+  }
+
+  private async writeTypesFile(): Promise<string> {
+    const content = `// Common types for MCP API schemas
+
+export interface MCPToolCall {
+  namespace: string;
+  tool: string;
+  args: any;
+}
+
+export interface MCPToolResult {
+  success: boolean;
+  result?: any;
+  error?: string;
+}
+
+export interface MCPServerInfo {
+  name: string;
+  status: 'connected' | 'disconnected' | 'error';
+  tools: string[];
+  lastSeen: Date;
+}
+
+export interface MCPCapabilities {
+  servers: string[];
+  tools: string[];
+  namespaces: string[];
+}
+
+// Utility types
+export type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
+export type MCPMethod<T extends (...args: any[]) => any> = T;
+export type MCPMethodArgs<T extends (...args: any[]) => any> = Parameters<T>[0];
+export type MCPMethodResult<T extends (...args: any[]) => any> = UnwrapPromise<ReturnType<T>>;
+`;
+
+    return this.writeSchemaFile('types', content);
+  }
+
+  private async formatContent(content: string): Promise<string> {
+    // Basic formatting - in production, you might integrate with Prettier/ESLint
+    let formatted = content;
+
+    if (this.config.formatting.prettier) {
+      formatted = await this.formatWithPrettier(formatted);
+    }
+
+    if (this.config.formatting.eslint) {
+      formatted = await this.formatWithESLint(formatted);
+    }
+
+    return formatted;
+  }
+
+  private async formatWithPrettier(content: string): Promise<string> {
+    try {
+      // Placeholder - would use prettier programmatically
+      const prettier = await import('prettier');
+      return prettier.format(content, {
+        parser: 'typescript',
+        singleQuote: true,
+        semi: true,
+        trailingComma: 'es5'
+      });
+    } catch {
+      // Prettier not available, return as-is
+      return content;
+    }
+  }
+
+  private async formatWithESLint(content: string): Promise<string> {
+    try {
+      // Placeholder - would use ESLint programmatically
+      return content; // For now, return as-is
+    } catch {
+      return content;
+    }
+  }
+
+  private async ensureOutputDirectory(): Promise<void> {
+    try {
+      await mkdir(this.config.outputDir, { recursive: true });
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+
+  private hasRegistryChanged(newRegistry: ToolRegistry): boolean {
+    // Simple change detection based on last updated timestamp
+    if (!this.lastGeneration) {
+      return true;
+    }
+
+    return newRegistry.lastUpdated > this.lastGeneration;
+  }
+
+  private pascalCase(str: string): string {
+    return str.replace(/[-_](.)/g, (_, char) => char.toUpperCase())
+              .replace(/^./, char => char.toUpperCase());
+  }
+
+  // Manual generation trigger
+  async triggerGeneration(toolRegistry: ToolRegistry): Promise<GenerationResult> {
+    console.log('🔄 Manually triggering schema generation...');
+    return this.generateSchemas(toolRegistry);
+  }
+
+  // Get generation status
+  getStatus(): {
+    isGenerating: boolean;
+    lastGeneration: Date | null;
+    queueLength: number;
+    config: AutoGeneratorConfig;
+  } {
+    return {
+      isGenerating: this.isGenerating,
+      lastGeneration: this.lastGeneration,
+      queueLength: this.generationQueue.length,
+      config: this.config
+    };
+  }
+
+  // Update configuration
+  updateConfig(newConfig: Partial<AutoGeneratorConfig>): void {
+    this.config = { ...this.config, ...newConfig };
+    this.converter = new SchemaConverter(this.config.conversionOptions);
+
+    this.emit('configUpdated', this.config);
+  }
+
+  // Generate schemas for specific namespaces only
+  async generateForNamespaces(
+    toolRegistry: ToolRegistry,
+    namespaces: string[]
+  ): Promise<GenerationResult> {
+    const filteredRegistry: ToolRegistry = {
+      servers: toolRegistry.servers,
+      tools: new Map(),
+      namespaces: toolRegistry.namespaces,
+      lastUpdated: toolRegistry.lastUpdated
+    };
+
+    // Filter tools to only include specified namespaces
+    for (const [name, tool] of toolRegistry.tools) {
+      const [namespace] = tool.namespace.split('.', 1);
+      if (namespaces.includes(namespace)) {
+        filteredRegistry.tools.set(name, tool);
+      }
+    }
+
+    return this.generateSchemas(filteredRegistry);
+  }
+
+  // Clean up generated files
+  async cleanupGeneratedFiles(): Promise<void> {
+    try {
+      const { readdir, unlink } = await import('fs/promises');
+      const files = await readdir(this.config.outputDir);
+
+      const tsFiles = files.filter(file => file.endsWith(this.config.fileNaming.extension));
+
+      for (const file of tsFiles) {
+        await unlink(join(this.config.outputDir, file));
+      }
+
+      console.log(`🗑️  Cleaned up ${tsFiles.length} generated files`);
+    } catch (error) {
+      console.warn('Failed to cleanup generated files:', error.message);
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    this.isGenerating = false;
+    this.generationQueue.length = 0;
+    this.removeAllListeners();
+  }
+}

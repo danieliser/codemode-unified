@@ -1,0 +1,244 @@
+import { SchemaFirstToolRegistry } from './registry.js';
+import { createNativeToolsRegistry } from './native-tools.js';
+import { MCPManager } from '../mcp/index.js';
+import type { MCPConfig } from '../types/core.js';
+
+export interface UnifiedToolsManager {
+  nativeTools: SchemaFirstToolRegistry;
+  mcpManager: MCPManager;
+}
+
+export class ToolsCoordinator {
+  private nativeRegistry: SchemaFirstToolRegistry;
+  private mcpManager: MCPManager | null = null;
+  private initialized = false;
+
+  constructor() {
+    this.nativeRegistry = createNativeToolsRegistry();
+  }
+
+  async initialize(mcpConfig?: MCPConfig): Promise<void> {
+    if (this.initialized) return;
+
+    console.log('🛠️  Initializing Tools Coordinator...');
+
+    // Initialize MCP manager if config provided
+    if (mcpConfig) {
+      this.mcpManager = new MCPManager(mcpConfig);
+      await this.mcpManager.initialize();
+    }
+
+    this.initialized = true;
+    console.log('✅ Tools Coordinator initialized');
+  }
+
+  // Execute any tool (native or MCP) by full name
+  async execute(fullName: string, args: any): Promise<any> {
+    if (!this.initialized) {
+      throw new Error('ToolsCoordinator not initialized');
+    }
+
+    // Try native tools first
+    const nativeTool = this.nativeRegistry.get(fullName);
+    if (nativeTool) {
+      console.log(`🔧 Executing native tool: ${fullName}`);
+      return this.nativeRegistry.execute(fullName, args);
+    }
+
+    // Try MCP tools
+    if (this.mcpManager) {
+      const mcpTools = this.mcpManager.getAvailableTools();
+      const mcpTool = mcpTools.find(tool => tool.namespace === fullName);
+
+      if (mcpTool) {
+        console.log(`📡 Executing MCP tool: ${fullName}`);
+        return this.mcpManager.callTool(fullName, args);
+      }
+    }
+
+    throw new Error(`Tool ${fullName} not found in native or MCP registries`);
+  }
+
+  // Get all available tools from both sources
+  getAllTools(): { native: any[]; mcp: any[] } {
+    const native = this.nativeRegistry.getDocumentation();
+    const mcp = this.mcpManager ? this.mcpManager.getToolsSummary() : [];
+
+    return { native, mcp };
+  }
+
+  // Generate unified TypeScript definitions
+  generateTypeDefinitions(): string {
+    const nativeTypes = this.nativeRegistry.generateTypeDefinitions();
+    const mcpTypes = this.mcpManager ? this.mcpManager.generateTypeDefinitions() : '';
+
+    return `
+// =================================
+// NATIVE TOOLS
+// =================================
+${nativeTypes}
+
+// =================================
+// MCP TOOLS
+// =================================
+${mcpTypes}
+
+// =================================
+// UNIFIED TOOLS INTERFACE
+// =================================
+declare global {
+  interface UnifiedToolsAPI {
+    // Execute any tool by full name
+    execute(fullName: string, args?: any): Promise<any>;
+
+    // Get tool documentation
+    getDocumentation(): {
+      native: { namespace: string; tools: any[] }[];
+      mcp: { namespace: string; tools: any[] }[];
+    };
+
+    // Check if tool exists
+    hasNativeTool(fullName: string): boolean;
+    hasMCPTool(fullName: string): boolean;
+  }
+
+  const unifiedTools: UnifiedToolsAPI;
+}
+`;
+  }
+
+  // Create sandbox injection code
+  createSandboxInjection(): string {
+    const nativeInjection = this.nativeRegistry.createSandboxInjection();
+    const mcpInjection = this.mcpManager ? this.mcpManager.createSandboxInjection() : '';
+
+    return `
+// Unified Tools Runtime for Sandbox Environment
+
+${nativeInjection}
+
+${mcpInjection}
+
+// Unified tools API
+globalThis.unifiedTools = {
+  async execute(fullName, args = {}) {
+    // Try native tools first
+    if (typeof globalThis.__executeNativeTool === 'function') {
+      try {
+        return await globalThis.__executeNativeTool(fullName, args);
+      } catch (error: unknown) {
+        // If not a native tool, continue to MCP
+        if (!error.message.includes('not found')) {
+          throw error;
+        }
+      }
+    }
+
+    // Try MCP tools
+    if (typeof globalThis.mcp !== 'undefined') {
+      const [namespace, toolName] = fullName.split('.', 2);
+      if (globalThis.mcp[namespace] && globalThis.mcp[namespace][toolName]) {
+        return await globalThis.mcp[namespace][toolName](args);
+      }
+    }
+
+    throw new Error(\`Tool \${fullName} not found in any registry\`);
+  },
+
+  getDocumentation() {
+    return {
+      native: ${JSON.stringify(this.nativeRegistry.getDocumentation())},
+      mcp: globalThis.mcpToolsSummary || []
+    };
+  },
+
+  hasNativeTool(fullName) {
+    return typeof globalThis.tools !== 'undefined' &&
+           fullName.split('.').reduce((obj, key) => obj && obj[key], globalThis.tools) !== undefined;
+  },
+
+  hasMCPTool(fullName) {
+    const [namespace, toolName] = fullName.split('.', 2);
+    return typeof globalThis.mcp !== 'undefined' &&
+           globalThis.mcp[namespace] &&
+           typeof globalThis.mcp[namespace][toolName] === 'function';
+  }
+};
+
+// Convenience aliases
+globalThis.execute = globalThis.unifiedTools.execute;
+globalThis.hasTool = (fullName) =>
+  globalThis.unifiedTools.hasNativeTool(fullName) ||
+  globalThis.unifiedTools.hasMCPTool(fullName);
+`;
+  }
+
+  // Get comprehensive tool documentation
+  getToolsDocumentation(): {
+    summary: { totalNative: number; totalMCP: number; namespaces: string[] };
+    native: { namespace: string; tools: any[] }[];
+    mcp: { namespace: string; tools: any[] }[];
+  } {
+    const native = this.nativeRegistry.getDocumentation();
+    const mcp = this.mcpManager ? this.mcpManager.getToolsSummary() : [];
+
+    const allNamespaces = new Set([
+      ...native.map(n => n.namespace),
+      ...mcp.map(m => m.namespace)
+    ]);
+
+    return {
+      summary: {
+        totalNative: native.reduce((sum, ns) => sum + ns.tools.length, 0),
+        totalMCP: mcp.reduce((sum, ns) => sum + ns.tools.length, 0),
+        namespaces: Array.from(allNamespaces).sort()
+      },
+      native,
+      mcp
+    };
+  }
+
+  // Check tool availability
+  hasNativeTool(fullName: string): boolean {
+    return this.nativeRegistry.get(fullName) !== undefined;
+  }
+
+  hasMCPTool(fullName: string): boolean {
+    if (!this.mcpManager) return false;
+
+    const tools = this.mcpManager.getAvailableTools();
+    return tools.some(tool => tool.namespace === fullName);
+  }
+
+  // Register additional native tools at runtime
+  registerNativeTool(definition: any): void {
+    this.nativeRegistry.register(definition);
+  }
+
+  // Add MCP server at runtime
+  async addMCPServer(name: string, config: any): Promise<void> {
+    if (!this.mcpManager) {
+      throw new Error('MCP Manager not initialized');
+    }
+
+    await this.mcpManager.addServer(name, config);
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.mcpManager) {
+      await this.mcpManager.shutdown();
+    }
+
+    console.log('🔄 Tools Coordinator shutdown complete');
+  }
+}
+
+// Factory function
+export function createToolsCoordinator(): ToolsCoordinator {
+  return new ToolsCoordinator();
+}
+
+// Export all tool-related functionality
+export { SchemaFirstToolRegistry } from './registry.js';
+export { registerNativeTools, createNativeToolsRegistry } from './native-tools.js';
+export type { ToolDefinition, RegisteredTool } from './registry.js';

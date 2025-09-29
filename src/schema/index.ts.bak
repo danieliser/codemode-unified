@@ -1,0 +1,371 @@
+import { SchemaConverter } from './converter.js';
+import { AutoSchemaGenerator } from './auto-generator.js';
+import type { ToolRegistry } from '../types/core.js';
+import type { ConversionOptions, NamespaceSchema } from './converter.js';
+import type { AutoGeneratorConfig, GenerationResult } from './auto-generator.js';
+
+export interface SchemaManagerConfig {
+  converter: ConversionOptions;
+  autoGenerator: Partial<AutoGeneratorConfig>;
+  enableAutoGeneration: boolean;
+  watchInterval: number;
+}
+
+export class SchemaManager {
+  private converter: SchemaConverter;
+  private autoGenerator?: AutoSchemaGenerator;
+  private config: SchemaManagerConfig;
+  private watchInterval?: NodeJS.Timeout;
+
+  constructor(config: Partial<SchemaManagerConfig> = {}) {
+    this.config = {
+      converter: {
+        includeOptional: true,
+        generateInterfaces: true,
+        generateRuntime: true,
+        namespaceSeparator: '.',
+        typePrefix: '',
+        indentation: '  '
+      },
+      autoGenerator: {
+        outputDir: './generated/schemas',
+        watchChanges: true,
+        generateOnStartup: true
+      },
+      enableAutoGeneration: true,
+      watchInterval: 5000,
+      ...config
+    };
+
+    this.converter = new SchemaConverter(this.config.converter);
+
+    if (this.config.enableAutoGeneration) {
+      this.autoGenerator = new AutoSchemaGenerator({
+        ...this.config.autoGenerator,
+        conversionOptions: this.config.converter
+      });
+    }
+  }
+
+  async initialize(toolRegistry?: ToolRegistry): Promise<void> {
+    console.log('🔧 Initializing Schema Manager...');
+
+    if (this.autoGenerator && toolRegistry) {
+      await this.autoGenerator.initialize(toolRegistry);
+
+      // Set up event listeners
+      this.autoGenerator.on('generationComplete', (result: GenerationResult) => {
+        console.log(`📝 Schema generation completed: ${result.filesGenerated.length} files`);
+      });
+
+      this.autoGenerator.on('generationError', (error: Error) => {
+        console.error('❌ Schema generation failed:', error.message);
+      });
+    }
+
+    console.log('✅ Schema Manager initialized');
+  }
+
+  // Convert tool registry to TypeScript definitions
+  convertRegistry(toolRegistry: ToolRegistry): NamespaceSchema[] {
+    const toolsByNamespace = this.groupToolsByNamespace(toolRegistry);
+    return this.converter.convertToolsByNamespace(toolsByNamespace);
+  }
+
+  // Generate and save schemas to files
+  async generateSchemas(toolRegistry: ToolRegistry): Promise<GenerationResult> {
+    if (!this.autoGenerator) {
+      throw new Error('Auto generation not enabled');
+    }
+
+    return this.autoGenerator.generateSchemas(toolRegistry);
+  }
+
+  // Start watching for changes and auto-generating
+  startWatching(toolRegistry: ToolRegistry, getRegistryFn: () => ToolRegistry): void {
+    if (!this.autoGenerator) {
+      throw new Error('Auto generation not enabled');
+    }
+
+    this.autoGenerator.startWatching(toolRegistry, getRegistryFn);
+  }
+
+  // Generate TypeScript definitions as strings
+  generateTypeScriptDefinitions(toolRegistry: ToolRegistry): {
+    unified: string;
+    namespaces: Record<string, string>;
+    stats: {
+      namespaces: number;
+      tools: number;
+      lines: number;
+    };
+  } {
+    const namespaceSchemas = this.convertRegistry(toolRegistry);
+
+    const unified = this.converter.generateUnifiedAPI(namespaceSchemas);
+
+    const namespaces: Record<string, string> = {};
+    for (const schema of namespaceSchemas) {
+      namespaces[schema.namespace] = this.converter.generateNamespaceFile(
+        schema.namespace,
+        schema.tools
+      );
+    }
+
+    const stats = this.converter.getConversionStats(namespaceSchemas);
+
+    return {
+      unified,
+      namespaces,
+      stats: {
+        namespaces: stats.totalNamespaces,
+        tools: stats.totalTools,
+        lines: stats.generatedLines
+      }
+    };
+  }
+
+  // Generate sandbox injection code
+  generateSandboxInjection(toolRegistry: ToolRegistry): string {
+    const namespaceSchemas = this.convertRegistry(toolRegistry);
+
+    const runtimeCode = namespaceSchemas.map(schema => schema.runtime).join('\n\n');
+
+    const globalSetup = `
+// MCP Tools Runtime Setup
+const mcpToolCall = async (namespace, args) => {
+  if (typeof globalThis.__mcpAggregator === 'undefined') {
+    throw new Error('MCP Aggregator not available in sandbox');
+  }
+  return await globalThis.__mcpAggregator.callTool(namespace, args);
+};
+
+${runtimeCode}
+
+// Create unified MCP API
+globalThis.mcp = {
+${namespaceSchemas.map(schema => `
+  ${schema.namespace}: new ${this.pascalCase(schema.namespace)}API(mcpToolCall),`
+).join('')}
+};
+
+// Tool availability check
+globalThis.hasMCPTool = (namespace) => {
+  const [ns, tool] = namespace.split('.', 2);
+  return globalThis.mcp[ns] && typeof globalThis.mcp[ns][tool] === 'function';
+};
+
+// List available tools
+globalThis.listMCPTools = () => {
+  const tools = [];
+  for (const [namespace, api] of Object.entries(globalThis.mcp)) {
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(api))
+      .filter(name => name !== 'constructor' && typeof api[name] === 'function');
+
+    for (const method of methods) {
+      tools.push(\`\${namespace}.\${method}\`);
+    }
+  }
+  return tools.sort();
+};
+`;
+
+    return globalSetup;
+  }
+
+  // Validate tool registry for schema generation
+  validateRegistry(toolRegistry: ToolRegistry): {
+    valid: boolean;
+    errors: string[];
+    warnings: string[];
+    stats: {
+      totalTools: number;
+      toolsWithInputSchema: number;
+      toolsWithOutputSchema: number;
+      namespaces: number;
+    };
+  } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    let totalTools = 0;
+    let toolsWithInputSchema = 0;
+    let toolsWithOutputSchema = 0;
+    const namespaces = new Set<string>();
+
+    for (const tool of toolRegistry.tools.values()) {
+      totalTools++;
+
+      // Extract namespace
+      const [namespace] = tool.namespace.split('.', 1);
+      namespaces.add(namespace);
+
+      // Check for input schema
+      if (tool.inputSchema) {
+        toolsWithInputSchema++;
+
+        // Validate input schema
+        if (!this.isValidJSONSchema(tool.inputSchema)) {
+          errors.push(`Tool ${tool.name}: Invalid input schema`);
+        }
+      } else {
+        warnings.push(`Tool ${tool.name}: No input schema defined`);
+      }
+
+      // Check for output schema
+      if (tool.outputSchema) {
+        toolsWithOutputSchema++;
+
+        // Validate output schema
+        if (!this.isValidJSONSchema(tool.outputSchema)) {
+          errors.push(`Tool ${tool.name}: Invalid output schema`);
+        }
+      } else {
+        warnings.push(`Tool ${tool.name}: No output schema defined (will use 'unknown' type)`);
+      }
+
+      // Check for required fields
+      if (!tool.name || !tool.description) {
+        errors.push(`Tool ${tool.name || 'unknown'}: Missing required fields (name, description)`);
+      }
+
+      // Check for valid namespace format
+      if (!tool.namespace || !tool.namespace.includes('.')) {
+        errors.push(`Tool ${tool.name}: Invalid namespace format (should be 'server.tool')`);
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      stats: {
+        totalTools,
+        toolsWithInputSchema,
+        toolsWithOutputSchema,
+        namespaces: namespaces.size
+      }
+    };
+  }
+
+  private isValidJSONSchema(schema: any): boolean {
+    try {
+      // Basic JSON Schema validation
+      return typeof schema === 'object' &&
+             schema !== null &&
+             typeof schema.type === 'string';
+    } catch {
+      return false;
+    }
+  }
+
+  private groupToolsByNamespace(toolRegistry: ToolRegistry): Map<string, any[]> {
+    const grouped = new Map<string, any[]>();
+
+    for (const tool of toolRegistry.tools.values()) {
+      const [namespace] = tool.namespace.split('.', 1);
+
+      if (!grouped.has(namespace)) {
+        grouped.set(namespace, []);
+      }
+
+      grouped.get(namespace)!.push(tool);
+    }
+
+    return grouped;
+  }
+
+  private pascalCase(str: string): string {
+    return str.replace(/[-_](.)/g, (_, char) => char.toUpperCase())
+              .replace(/^./, char => char.toUpperCase());
+  }
+
+  // Get generation status
+  getStatus(): {
+    enabled: boolean;
+    autoGenerator?: {
+      isGenerating: boolean;
+      lastGeneration: Date | null;
+      queueLength: number;
+    };
+    config: SchemaManagerConfig;
+  } {
+    return {
+      enabled: this.config.enableAutoGeneration,
+      autoGenerator: this.autoGenerator?.getStatus(),
+      config: this.config
+    };
+  }
+
+  // Update configuration
+  updateConfig(newConfig: Partial<SchemaManagerConfig>): void {
+    this.config = { ...this.config, ...newConfig };
+
+    // Update converter
+    this.converter = new SchemaConverter(this.config.converter);
+
+    // Update auto generator if enabled
+    if (this.autoGenerator) {
+      this.autoGenerator.updateConfig({
+        ...this.config.autoGenerator,
+        conversionOptions: this.config.converter
+      });
+    }
+  }
+
+  // Manually trigger schema generation
+  async triggerGeneration(toolRegistry: ToolRegistry): Promise<GenerationResult> {
+    if (!this.autoGenerator) {
+      throw new Error('Auto generation not enabled');
+    }
+
+    return this.autoGenerator.triggerGeneration(toolRegistry);
+  }
+
+  // Generate schemas for specific namespaces
+  async generateForNamespaces(
+    toolRegistry: ToolRegistry,
+    namespaces: string[]
+  ): Promise<GenerationResult> {
+    if (!this.autoGenerator) {
+      throw new Error('Auto generation not enabled');
+    }
+
+    return this.autoGenerator.generateForNamespaces(toolRegistry, namespaces);
+  }
+
+  // Clean up generated files
+  async cleanup(): Promise<void> {
+    if (this.autoGenerator) {
+      await this.autoGenerator.cleanupGeneratedFiles();
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.watchInterval) {
+      clearInterval(this.watchInterval);
+    }
+
+    if (this.autoGenerator) {
+      await this.autoGenerator.shutdown();
+    }
+  }
+}
+
+// Factory function
+export function createSchemaManager(config?: Partial<SchemaManagerConfig>): SchemaManager {
+  return new SchemaManager(config);
+}
+
+// Utility function to generate TypeScript from tool info
+export function generateTypeScriptFromTools(tools: any[], namespace: string): string {
+  const converter = new SchemaConverter();
+  const converted = converter.convertNamespace(namespace, tools);
+  return converter.generateNamespaceFile(namespace, tools);
+}
+
+// Export all schema-related functionality
+export { SchemaConverter } from './converter.js';
+export { AutoSchemaGenerator } from './auto-generator.js';
+export type { ConversionOptions, NamespaceSchema } from './converter.js';
+export type { AutoGeneratorConfig, GenerationResult } from './auto-generator.js';

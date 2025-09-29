@@ -1,0 +1,146 @@
+# Code Mode Unified Configuration Example
+# Copy this to config.yaml and customize for your environment
+
+server:
+  port: 3001
+  host: "localhost"
+  cors:
+    enabled: true
+    origins: ["*"]
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    headers: ["Content-Type", "Authorization"]
+    credentials: true
+  rateLimit:
+    windowMs: 60000 # 1 minute
+    maxRequests: 100
+    skipSuccessfulRequests: false
+  compression: true
+
+security:
+  auth:
+    provider: "jwt" # jwt, oauth2, api-key
+    issuer: "code-mode-unified"
+    audience: "code-execution"
+    secretKey: "your-secret-key-here" # Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    algorithm: "HS256"
+    expirationTime: 3600 # 1 hour
+  capabilities:
+    network:
+      allowedHosts: []
+      allowedPorts: []
+      maxRequestsPerSecond: 0
+      maxRequestSize: 0
+    filesystem:
+      allowedPaths: []
+      readOnly: true
+      maxFileSize: 0
+      allowedExtensions: []
+    mcp:
+      allowedServers: []
+      allowedTools: []
+      maxCallsPerSecond: 0
+      maxConcurrentCalls: 0
+    system:
+      allowEnvironmentAccess: false
+      allowProcessSpawn: false
+      maxProcesses: 0
+  audit:
+    enabled: true
+    logLevel: "all" # none, errors, all
+    storage: "file" # file, database, remote
+    retention: 30 # days
+
+sandbox:
+  runtime: "quickjs"
+  workers:
+    min: 2
+    max: 8
+    idleTimeout: 30000
+    maxQueueSize: 100
+    scaling:
+      enabled: true
+      scaleUpThreshold: 0.8
+      scaleDownThreshold: 0.2
+      cooldownMs: 5000
+  limits:
+    memory: 134217728 # 128MB in bytes
+    timeout: 30000 # 30 seconds
+    cpuQuota: 0.5 # 50%
+    maxStackSize: 1048576 # 1MB
+  security:
+    allowEval: false
+    allowFunction: false
+    allowImports: false
+    allowedModules: ["zod", "date-fns"]
+    blockedModules: ["fs", "child_process", "cluster", "crypto", "os", "path"]
+
+mcp:
+  servers:
+    # Example: HelpScout MCP server
+    # helpscout:
+    #   name: "helpscout"
+    #   transport: "stdio"
+    #   command: "npx"
+    #   args: ["help-scout-mcp-server"]
+    #   environment:
+    #     HELPSCOUT_CLIENT_ID: "your-client-id"
+    #     HELPSCOUT_CLIENT_SECRET: "your-client-secret"
+    #   timeout: 30000
+    #   retryPolicy:
+    #     maxAttempts: 3
+    #     backoffMs: 1000
+    #     maxBackoffMs: 5000
+    #     retryOn: ["ECONNREFUSED", "TIMEOUT"]
+    #   healthCheck:
+    #     enabled: true
+    #     intervalMs: 30000
+    #     timeoutMs: 5000
+    #     failureThreshold: 3
+
+    # Example: Filesystem MCP server
+    # filesystem:
+    #   name: "filesystem"
+    #   transport: "stdio"
+    #   command: "npx"
+    #   args: ["@modelcontextprotocol/server-filesystem", "/tmp"]
+    #   timeout: 30000
+
+  discovery:
+    enabled: false
+    intervalMs: 60000
+    directories: []
+    filePatterns: ["**/*.mcp.json"]
+  pooling:
+    maxConnections: 10
+    idleTimeout: 300000
+    reconnectAttempts: 3
+    reconnectDelay: 5000
+
+schema:
+  converter:
+    includeOptional: true
+    generateInterfaces: true
+    generateRuntime: true
+    namespaceSeparator: "."
+    typePrefix: ""
+    indentation: "  "
+  autoGenerator:
+    outputDir: "./generated/schemas"
+    watchChanges: true
+    generateOnStartup: true
+    fileNaming:
+      unified: "unified-api"
+      namespace: "{namespace}-api"
+      extension: ".ts"
+    formatting:
+      prettier: false
+      eslint: false
+  enableAutoGeneration: true
+  watchInterval: 5000
+
+logging:
+  level: "info" # trace, debug, info, warn, error, fatal
+  format: "pretty" # json, pretty
+  outputs:
+    - type: "console"
+  correlation: true

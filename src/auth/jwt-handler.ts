@@ -1,0 +1,410 @@
+import { SignJWT, jwtVerify, importPKCS8, importSPKI } from 'jose';
+import { randomBytes } from 'crypto';
+import type {
+  AuthContext,
+  CodeModeJWTPayload,
+  CapabilitySet
+} from '../types/core.js';
+
+export interface JWTConfig {
+  issuer: string;
+  audience: string;
+  secretKey?: string | undefined;
+  privateKey?: string | undefined; // PEM format for RS256
+  publicKey?: string | undefined;  // PEM format for RS256
+  algorithm: 'HS256' | 'RS256';
+  expirationTime: number; // seconds
+}
+
+export interface CreateTokenOptions {
+  userId: string;
+  scopes: string[];
+  capabilities?: CapabilitySet | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  customExpiry?: number | undefined; // Override default expiration
+}
+
+export interface VerifyTokenResult {
+  valid: boolean;
+  payload?: CodeModeJWTPayload | undefined;
+  authContext?: AuthContext | undefined;
+  error?: string | undefined;
+}
+
+export class JWTHandler {
+  private config: JWTConfig;
+  private secretKey?: Uint8Array;
+  private privateKey?: any;
+  private publicKey?: any;
+
+  constructor(config: JWTConfig) {
+    this.config = config;
+    this.initializeKeys();
+  }
+
+  private async initializeKeys(): Promise<void> {
+    if (this.config.algorithm === 'HS256') {
+      // HMAC with SHA-256
+      if (!this.config.secretKey) {
+        throw new Error('Secret key required for HS256 algorithm');
+      }
+      this.secretKey = new TextEncoder().encode(this.config.secretKey);
+    } else if (this.config.algorithm === 'RS256') {
+      // RSA with SHA-256
+      if (!this.config.privateKey || !this.config.publicKey) {
+        throw new Error('Private and public keys required for RS256 algorithm');
+      }
+
+      try {
+        this.privateKey = await importPKCS8(this.config.privateKey, 'RS256');
+        this.publicKey = await importSPKI(this.config.publicKey, 'RS256');
+      } catch (error: unknown) {
+        throw new Error(`Failed to import RSA keys: ${(error instanceof Error ? error.message : String(error))}`);
+      }
+    }
+  }
+
+  // Create a new JWT token
+  async createToken(options: CreateTokenOptions): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + (options.customExpiry || this.config.expirationTime);
+
+    const payload: CodeModeJWTPayload = {
+      sub: options.userId,
+      iat: now,
+      exp: exp,
+      aud: this.config.audience,
+      iss: this.config.issuer,
+      scopes: options.scopes,
+      capabilities: options.capabilities || this.getDefaultCapabilities(options.scopes)
+    };
+
+    // Add custom metadata to payload
+    if (options.metadata) {
+      Object.assign(payload, options.metadata);
+    }
+
+    let jwt: any;
+
+    if (this.config.algorithm === 'HS256') {
+      jwt = new SignJWT(payload)
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt(now)
+        .setExpirationTime(exp)
+        .setSubject(options.userId)
+        .setIssuer(this.config.issuer)
+        .setAudience(this.config.audience);
+
+      return jwt.sign(this.secretKey!);
+    } else {
+      jwt = new SignJWT(payload)
+        .setProtectedHeader({ alg: 'RS256' })
+        .setIssuedAt(now)
+        .setExpirationTime(exp)
+        .setSubject(options.userId)
+        .setIssuer(this.config.issuer)
+        .setAudience(this.config.audience);
+
+      return jwt.sign(this.privateKey);
+    }
+  }
+
+  // Verify and decode a JWT token
+  async verifyToken(token: string): Promise<VerifyTokenResult> {
+    try {
+      let result: any;
+
+      if (this.config.algorithm === 'HS256') {
+        result = await jwtVerify(token, this.secretKey!, {
+          issuer: this.config.issuer,
+          audience: this.config.audience
+        });
+      } else {
+        result = await jwtVerify(token, this.publicKey, {
+          issuer: this.config.issuer,
+          audience: this.config.audience
+        });
+      }
+
+      const payload = result.payload as CodeModeJWTPayload;
+
+      // Create AuthContext from JWT payload
+      const authContext: AuthContext = {
+        userId: payload.sub,
+        sessionId: this.generateSessionId(),
+        scopes: payload.scopes,
+        capabilities: payload.capabilities,
+        expiresAt: new Date(payload.exp * 1000),
+        metadata: {
+          ...this.extractMetadata(payload),
+          tokenIssuedAt: new Date(payload.iat * 1000),
+          tokenIssuer: payload.iss
+        }
+      };
+
+      return {
+        valid: true,
+        payload,
+        authContext
+      };
+
+    } catch (error: unknown) {
+      return {
+        valid: false,
+        error: (error instanceof Error ? error.message : String(error))
+      };
+    }
+  }
+
+  // Extract metadata from JWT payload (excluding standard claims)
+  private extractMetadata(payload: CodeModeJWTPayload): Record<string, unknown> {
+    const standardClaims = ['sub', 'iat', 'exp', 'aud', 'iss', 'scopes', 'capabilities'];
+    const metadata: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(payload)) {
+      if (!standardClaims.includes(key)) {
+        metadata[key] = value;
+      }
+    }
+
+    return metadata;
+  }
+
+  // Create a refresh token (longer-lived)
+  async createRefreshToken(userId: string, sessionId: string): Promise<string> {
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + (30 * 24 * 60 * 60); // 30 days
+
+    const payload = {
+      sub: userId,
+      sessionId,
+      type: 'refresh',
+      iat: now,
+      exp: exp,
+      aud: this.config.audience,
+      iss: this.config.issuer
+    };
+
+    let jwt: any;
+
+    if (this.config.algorithm === 'HS256') {
+      jwt = new SignJWT(payload)
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt(now)
+        .setExpirationTime(exp)
+        .setSubject(userId)
+        .setIssuer(this.config.issuer)
+        .setAudience(this.config.audience);
+
+      return jwt.sign(this.secretKey!);
+    } else {
+      jwt = new SignJWT(payload)
+        .setProtectedHeader({ alg: 'RS256' })
+        .setIssuedAt(now)
+        .setExpirationTime(exp)
+        .setSubject(userId)
+        .setIssuer(this.config.issuer)
+        .setAudience(this.config.audience);
+
+      return jwt.sign(this.privateKey);
+    }
+  }
+
+  // Refresh an access token using a refresh token
+  async refreshAccessToken(
+    refreshToken: string,
+    newScopes?: string[],
+    newCapabilities?: CapabilitySet
+  ): Promise<{ accessToken: string; refreshToken: string }> {
+    const verifyResult = await this.verifyToken(refreshToken);
+
+    if (!verifyResult.valid || !verifyResult.payload) {
+      throw new Error('Invalid refresh token');
+    }
+
+    // Check if it's actually a refresh token
+    if ((verifyResult.payload as any).type !== 'refresh') {
+      throw new Error('Token is not a refresh token');
+    }
+
+    const userId = verifyResult.payload.sub;
+    const sessionId = (verifyResult.payload as any).sessionId;
+
+    // Create new access token
+    const accessToken = await this.createToken({
+      userId,
+      scopes: newScopes || ['code:execute'], // Default scopes if none provided
+      capabilities: newCapabilities
+    });
+
+    // Create new refresh token
+    const newRefreshToken = await this.createRefreshToken(userId, sessionId);
+
+    return {
+      accessToken,
+      refreshToken: newRefreshToken
+    };
+  }
+
+  // Create API key token (long-lived, specific scopes)
+  async createAPIKey(
+    userId: string,
+    name: string,
+    scopes: string[],
+    expirationDays?: number
+  ): Promise<{ token: string; keyId: string }> {
+    const keyId = this.generateKeyId();
+    const expiration = expirationDays ? (expirationDays * 24 * 60 * 60) : (365 * 24 * 60 * 60); // Default 1 year
+
+    const token = await this.createToken({
+      userId,
+      scopes,
+      capabilities: this.getDefaultCapabilities(scopes),
+      customExpiry: expiration,
+      metadata: {
+        type: 'api_key',
+        keyId,
+        name
+      }
+    });
+
+    return { token, keyId };
+  }
+
+  // Validate API key and extract info
+  async validateAPIKey(token: string): Promise<{ valid: boolean; keyId?: string; userId?: string; scopes?: string[] }> {
+    const verifyResult = await this.verifyToken(token);
+
+    if (!verifyResult.valid || !verifyResult.payload) {
+      return { valid: false };
+    }
+
+    const payload = verifyResult.payload as any;
+
+    if (payload.type !== 'api_key') {
+      return { valid: false };
+    }
+
+    return {
+      valid: true,
+      keyId: payload.keyId,
+      userId: payload.sub,
+      scopes: payload.scopes
+    };
+  }
+
+  // Get default capabilities based on scopes
+  private getDefaultCapabilities(scopes: string[]): CapabilitySet {
+    const capabilities: CapabilitySet = {
+      network: {
+        allowedHosts: [],
+        allowedPorts: [],
+        maxRequestsPerSecond: 0,
+        maxRequestSize: 0
+      },
+      filesystem: {
+        allowedPaths: [],
+        readOnly: true,
+        maxFileSize: 0,
+        allowedExtensions: []
+      },
+      mcp: {
+        allowedServers: [],
+        allowedTools: [],
+        maxCallsPerSecond: 0,
+        maxConcurrentCalls: 0
+      },
+      system: {
+        allowEnvironmentAccess: false,
+        allowProcessSpawn: false,
+        maxProcesses: 0
+      }
+    };
+
+    // Grant capabilities based on scopes
+    if (scopes.includes('code:execute')) {
+      capabilities.mcp!.allowedServers = ['native'];
+      capabilities.mcp!.maxCallsPerSecond = 10;
+      capabilities.mcp!.maxConcurrentCalls = 3;
+    }
+
+    if (scopes.includes('code:network')) {
+      capabilities.network!.allowedHosts = ['httpbin.org', 'api.github.com'];
+      capabilities.network!.allowedPorts = [80, 443];
+      capabilities.network!.maxRequestsPerSecond = 10;
+      capabilities.network!.maxRequestSize = 1024 * 1024; // 1MB
+    }
+
+    if (scopes.includes('code:filesystem')) {
+      capabilities.filesystem!.allowedPaths = ['/tmp'];
+      capabilities.filesystem!.maxFileSize = 1024 * 1024; // 1MB
+      capabilities.filesystem!.allowedExtensions = ['.txt', '.json', '.csv'];
+    }
+
+    if (scopes.includes('admin')) {
+      // Admin users get extended capabilities
+      capabilities.network!.allowedHosts = ['*'];
+      capabilities.filesystem!.allowedPaths = ['/tmp', '/var/tmp'];
+      capabilities.filesystem!.readOnly = false;
+      capabilities.mcp!.allowedServers = ['*'];
+      capabilities.mcp!.allowedTools = ['*'];
+      capabilities.system!.allowEnvironmentAccess = true;
+    }
+
+    return capabilities;
+  }
+
+  private generateSessionId(): string {
+    return randomBytes(16).toString('hex');
+  }
+
+  private generateKeyId(): string {
+    return `key_${randomBytes(12).toString('hex')}`;
+  }
+
+  // Generate a secure secret key for HMAC
+  static generateSecretKey(): string {
+    return randomBytes(32).toString('hex');
+  }
+
+  // Get token info without verification (for debugging)
+  decodeToken(token: string): any {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        throw new Error('Invalid JWT format');
+      }
+
+      const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+
+      return { header, payload };
+    } catch (error: unknown) {
+      throw new Error(`Failed to decode token: ${(error instanceof Error ? error.message : String(error))}`);
+    }
+  }
+
+  // Check if token is expired (without verification)
+  isTokenExpired(token: string): boolean {
+    try {
+      const decoded = this.decodeToken(token);
+      const exp = decoded.payload.exp;
+      const now = Math.floor(Date.now() / 1000);
+      return exp < now;
+    } catch {
+      return true; // Consider invalid tokens as expired
+    }
+  }
+
+  // Get time until token expires
+  getTimeUntilExpiry(token: string): number | null {
+    try {
+      const decoded = this.decodeToken(token);
+      const exp = decoded.payload.exp;
+      const now = Math.floor(Date.now() / 1000);
+      return Math.max(0, exp - now);
+    } catch {
+      return null;
+    }
+  }
+}

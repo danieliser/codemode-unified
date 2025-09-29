@@ -1,0 +1,369 @@
+import { EventEmitter } from 'events';
+import type {
+  MCPServerConfig,
+  ToolRegistry,
+  ServerInfo,
+  ToolInfo,
+  HealthStatus
+} from '../types/core.js';
+
+export interface MCPConnection {
+  name: string;
+  config: MCPServerConfig;
+  client: any; // MCP client instance
+  status: 'connecting' | 'connected' | 'disconnected' | 'error';
+  lastSeen: Date;
+  tools: Map<string, ToolInfo>;
+  retryCount: number;
+}
+
+export class MCPAggregator extends EventEmitter {
+  private connections: Map<string, MCPConnection> = new Map();
+  private registry: ToolRegistry;
+  private healthCheckInterval: NodeJS.Timeout | null = null;
+  private readonly maxRetries = 3;
+  private readonly reconnectDelay = 5000;
+
+  constructor() {
+    super();
+    this.registry = {
+      servers: new Map(),
+      tools: new Map(),
+      namespaces: new Map(),
+      lastUpdated: new Date()
+    };
+  }
+
+  async initialize(serverConfigs: Record<string, MCPServerConfig>): Promise<void> {
+    console.log(`🔌 Initializing MCP Aggregator with ${Object.keys(serverConfigs).length} servers...`);
+
+    // Initialize all server connections in parallel
+    const connectionPromises = Object.entries(serverConfigs).map(
+      ([name, config]) => this.connectServer(name, config)
+    );
+
+    await Promise.allSettled(connectionPromises);
+
+    // Start health monitoring
+    this.startHealthMonitoring();
+
+    console.log(`✅ MCP Aggregator initialized with ${this.connections.size} connections`);
+  }
+
+  private async connectServer(name: string, config: MCPServerConfig): Promise<void> {
+    console.log(`🔗 Connecting to MCP server: ${name}`);
+
+    const connection: MCPConnection = {
+      name,
+      config,
+      client: null,
+      status: 'connecting',
+      lastSeen: new Date(),
+      tools: new Map(),
+      retryCount: 0
+    };
+
+    this.connections.set(name, connection);
+
+    try {
+      // Create MCP client based on transport type
+      const client = await this.createMCPClient(config);
+
+      connection.client = client;
+      connection.status = 'connected';
+      connection.lastSeen = new Date();
+
+      // Discover tools from this server
+      await this.discoverTools(connection);
+
+      // Update registry
+      this.updateRegistry(connection);
+
+      console.log(`✅ Connected to ${name}: ${connection.tools.size} tools discovered`);
+      this.emit('serverConnected', name, connection);
+
+    } catch (error: unknown) {
+      console.error(`❌ Failed to connect to ${name}:`, (error instanceof Error ? error.message : String(error)));
+      connection.status = 'error';
+      this.emit('serverError', name, error);
+
+      // Schedule retry
+      this.scheduleReconnect(name);
+    }
+  }
+
+  private async createMCPClient(config: MCPServerConfig): Promise<any> {
+    // This is a placeholder for actual MCP client creation
+    // In a real implementation, this would use the MCP SDK
+
+    switch (config.transport) {
+      case 'stdio':
+        return this.createStdioClient(config);
+      case 'http':
+        return this.createHttpClient(config);
+      case 'websocket':
+        return this.createWebSocketClient(config);
+      default:
+        throw new Error(`Unsupported transport: ${config.transport}`);
+    }
+  }
+
+  private async createStdioClient(config: MCPServerConfig): Promise<any> {
+    // Placeholder for stdio MCP client
+    return {
+      type: 'stdio',
+      command: config.command,
+      args: config.args || [],
+      listTools: async () => [
+        {
+          name: 'example_tool',
+          description: 'Example tool for testing',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'Search query' }
+            }
+          }
+        }
+      ],
+      callTool: async (name: string, args: any) => {
+        return { result: `Tool ${name} called with args: ${JSON.stringify(args)}` };
+      }
+    };
+  }
+
+  private async createHttpClient(config: MCPServerConfig): Promise<any> {
+    // Placeholder for HTTP MCP client
+    return {
+      type: 'http',
+      url: config.url,
+      listTools: async () => [],
+      callTool: async (name: string, args: any) => {
+        const response = await fetch(`${config.url}/tools/${name}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(args)
+        });
+        return response.json();
+      }
+    };
+  }
+
+  private async createWebSocketClient(config: MCPServerConfig): Promise<any> {
+    // Placeholder for WebSocket MCP client
+    return {
+      type: 'websocket',
+      url: config.url,
+      listTools: async () => [],
+      callTool: async (name: string, args: any) => {
+        // WebSocket implementation would go here
+        return { result: 'WebSocket call result' };
+      }
+    };
+  }
+
+  private async discoverTools(connection: MCPConnection): Promise<void> {
+    try {
+      const tools = await connection.client.listTools();
+
+      connection.tools.clear();
+
+      for (const tool of tools) {
+        const toolInfo: ToolInfo = {
+          name: tool.name,
+          serverName: connection.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          outputSchema: tool.outputSchema,
+          namespace: this.generateNamespace(connection.name, tool.name),
+          metadata: tool.metadata || {}
+        };
+
+        connection.tools.set(tool.name, toolInfo);
+      }
+
+    } catch (error: unknown) {
+      console.error(`Failed to discover tools for ${connection.name}:`, (error instanceof Error ? error.message : String(error)));
+      throw error;
+    }
+  }
+
+  private generateNamespace(serverName: string, toolName: string): string {
+    // Create namespace like "helpscout.searchInboxes" or "filesystem.readFile"
+    return `${serverName}.${toolName}`;
+  }
+
+  private updateRegistry(connection: MCPConnection): void {
+    // Update server info
+    const serverInfo: ServerInfo = {
+      name: connection.name,
+      status: connection.status as 'connected' | 'disconnected' | 'error',
+      config: connection.config,
+      health: this.getHealthStatus(connection),
+      toolCount: connection.tools.size,
+      lastSeen: connection.lastSeen
+    };
+
+    this.registry.servers.set(connection.name, serverInfo);
+
+    // Update tools registry
+    for (const [toolName, toolInfo] of connection.tools) {
+      const namespacedName = toolInfo.namespace;
+      this.registry.tools.set(namespacedName, toolInfo);
+
+      // Update namespace mapping
+      const namespace = connection.name;
+      if (!this.registry.namespaces.has(namespace)) {
+        this.registry.namespaces.set(namespace, []);
+      }
+      this.registry.namespaces.get(namespace)!.push(namespacedName);
+    }
+
+    this.registry.lastUpdated = new Date();
+    this.emit('registryUpdated', this.registry);
+  }
+
+  private getHealthStatus(connection: MCPConnection): HealthStatus {
+    const now = new Date();
+    const timeSinceLastSeen = now.getTime() - connection.lastSeen.getTime();
+
+    let status: 'healthy' | 'unhealthy' | 'unknown' = 'unknown';
+
+    if (connection.status === 'connected' && timeSinceLastSeen < 60000) {
+      status = 'healthy';
+    } else if (connection.status === 'error' || timeSinceLastSeen > 300000) {
+      status = 'unhealthy';
+    }
+
+    return {
+      status,
+      lastCheck: now,
+      responseTime: timeSinceLastSeen,
+      error: connection.status === 'error' ? 'Connection failed' : undefined
+    };
+  }
+
+  async callTool(namespace: string, args: any): Promise<any> {
+    const [serverName, toolName] = namespace.split('.', 2);
+
+    const connection = this.connections.get(serverName);
+    if (!connection || connection.status !== 'connected') {
+      throw new Error(`Server ${serverName} is not available`);
+    }
+
+    const toolInfo = connection.tools.get(toolName);
+    if (!toolInfo) {
+      throw new Error(`Tool ${toolName} not found on server ${serverName}`);
+    }
+
+    try {
+      const result = await connection.client.callTool(toolName, args);
+
+      // Update last seen time
+      connection.lastSeen = new Date();
+
+      return result;
+
+    } catch (error: unknown) {
+      console.error(`Tool call failed for ${namespace}:`, (error instanceof Error ? error.message : String(error)));
+
+      // Mark connection as potentially unhealthy
+      if ((error instanceof Error ? error.message : String(error)).includes('timeout') || (error instanceof Error ? error.message : String(error)).includes('connection')) {
+        connection.status = 'error';
+        this.scheduleReconnect(serverName);
+      }
+
+      throw error;
+    }
+  }
+
+  getAvailableTools(): ToolInfo[] {
+    return Array.from(this.registry.tools.values());
+  }
+
+  getServerStatus(): ServerInfo[] {
+    return Array.from(this.registry.servers.values());
+  }
+
+  getToolsByNamespace(namespace: string): ToolInfo[] {
+    const toolNames = this.registry.namespaces.get(namespace) || [];
+    return toolNames.map(name => this.registry.tools.get(name)!).filter(Boolean);
+  }
+
+  private scheduleReconnect(serverName: string): void {
+    const connection = this.connections.get(serverName);
+    if (!connection || connection.retryCount >= this.maxRetries) {
+      return;
+    }
+
+    connection.retryCount++;
+    const delay = this.reconnectDelay * Math.pow(2, connection.retryCount - 1); // Exponential backoff
+
+    console.log(`⏳ Scheduling reconnect for ${serverName} in ${delay}ms (attempt ${connection.retryCount}/${this.maxRetries})`);
+
+    setTimeout(async () => {
+      if (connection.status === 'error') {
+        console.log(`🔄 Retrying connection to ${serverName}...`);
+        await this.connectServer(serverName, connection.config);
+      }
+    }, delay);
+  }
+
+  private startHealthMonitoring(): void {
+    this.healthCheckInterval = setInterval(async () => {
+      await this.performHealthChecks();
+    }, 30000); // Check every 30 seconds
+  }
+
+  private async performHealthChecks(): Promise<void> {
+    for (const [name, connection] of this.connections) {
+      if (connection.status === 'connected') {
+        try {
+          // Simple ping to check if connection is still alive
+          await connection.client.listTools();
+          connection.lastSeen = new Date();
+        } catch (error: unknown) {
+          console.warn(`Health check failed for ${name}:`, (error instanceof Error ? error.message : String(error)));
+          connection.status = 'error';
+          this.scheduleReconnect(name);
+        }
+      }
+    }
+
+    // Update registry with latest health status
+    for (const connection of this.connections.values()) {
+      this.updateRegistry(connection);
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    console.log('🔄 Shutting down MCP Aggregator...');
+
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+
+    // Close all connections
+    const shutdownPromises = Array.from(this.connections.values()).map(
+      async (connection) => {
+        if (connection.client && typeof connection.client.close === 'function') {
+          try {
+            await connection.client.close();
+          } catch (error: unknown) {
+            console.warn(`Error closing connection ${connection.name}:`, (error instanceof Error ? error.message : String(error)));
+          }
+        }
+      }
+    );
+
+    await Promise.allSettled(shutdownPromises);
+
+    this.connections.clear();
+    this.registry.servers.clear();
+    this.registry.tools.clear();
+    this.registry.namespaces.clear();
+
+    console.log('✅ MCP Aggregator shutdown complete');
+  }
+}

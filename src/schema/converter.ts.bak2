@@ -1,0 +1,495 @@
+import type { JSONSchema7 } from 'json-schema';
+import type { ToolInfo } from '../types/core.js';
+
+export interface ConversionOptions {
+  includeOptional?: boolean;
+  generateInterfaces?: boolean;
+  generateRuntime?: boolean;
+  namespaceSeparator?: string;
+  typePrefix?: string;
+  indentation?: string;
+}
+
+export interface ConvertedSchema {
+  typescript: string;
+  interfaces: string;
+  runtime: string;
+  errors: string[];
+}
+
+export interface NamespaceSchema {
+  namespace: string;
+  tools: ToolInfo[];
+  typescript: string;
+  interfaces: string;
+  runtime: string;
+}
+
+export class SchemaConverter {
+  private options: Required<ConversionOptions>;
+
+  constructor(options: ConversionOptions = {}) {
+    this.options = {
+      includeOptional: true,
+      generateInterfaces: true,
+      generateRuntime: true,
+      namespaceSeparator: '.',
+      typePrefix: '',
+      indentation: '  ',
+      ...options
+    };
+  }
+
+  // Convert multiple tools organized by namespace
+  convertToolsByNamespace(toolsByNamespace: Map<string, ToolInfo[]>): NamespaceSchema[] {
+    const results: NamespaceSchema[] = [];
+
+    for (const [namespace, tools] of toolsByNamespace) {
+      const converted = this.convertNamespace(namespace, tools);
+      results.push(converted);
+    }
+
+    return results;
+  }
+
+  // Convert a single namespace with its tools
+  convertNamespace(namespace: string, tools: ToolInfo[]): NamespaceSchema {
+    const interfaces: string[] = [];
+    const runtimeMethods: string[] = [];
+    const tsDefinitions: string[] = [];
+
+    for (const tool of tools) {
+      const converted = this.convertTool(tool);
+
+      if (converted.interfaces) {
+        interfaces.push(converted.interfaces);
+      }
+
+      // Generate method signature
+      const inputType = this.generateInputType(tool);
+      const outputType = this.generateOutputType(tool);
+      const methodName = this.camelCase(tool.name);
+
+      tsDefinitions.push(`
+${this.options.indentation}/**
+${this.options.indentation} * ${tool.description}
+${this.options.indentation} */
+${this.options.indentation}${methodName}(args: ${inputType}): Promise<${outputType}>;`);
+
+      // Generate runtime method
+      runtimeMethods.push(`
+${this.options.indentation}async ${methodName}(args: ${inputType}): Promise<${outputType}> {
+${this.options.indentation}${this.options.indentation}return await this.callTool('${tool.namespace}', args);
+${this.options.indentation}}`);
+    }
+
+    const interfaceName = this.pascalCase(namespace) + 'API';
+
+    const typescript = `
+interface ${interfaceName} {${tsDefinitions.join('')}
+}`;
+
+    const interfaceDefinitions = interfaces.length > 0 ? interfaces.join('\n\n') : '';
+
+    const runtime = `
+class ${interfaceName} {
+${this.options.indentation}constructor(private callTool: (namespace: string, args: any) => Promise<any>) {}
+${runtimeMethods.join('')}
+}`;
+
+    return {
+      namespace,
+      tools,
+      typescript,
+      interfaces: interfaceDefinitions,
+      runtime
+    };
+  }
+
+  // Convert a single tool
+  convertTool(tool: ToolInfo): ConvertedSchema {
+    const errors: string[] = [];
+    let typescript = '';
+    let interfaces = '';
+    let runtime = '';
+
+    try {
+      // Generate TypeScript interfaces for input/output
+      if (this.options.generateInterfaces) {
+        const inputInterface = this.generateInputInterface(tool);
+        const outputInterface = this.generateOutputInterface(tool);
+
+        interfaces = [inputInterface, outputInterface].filter(Boolean).join('\n\n');
+      }
+
+      // Generate TypeScript type definitions
+      const inputType = this.generateInputType(tool);
+      const outputType = this.generateOutputType(tool);
+
+      typescript = `
+/**
+ * ${tool.description}
+ */
+export declare function ${this.camelCase(tool.name)}(args: ${inputType}): Promise<${outputType}>;`;
+
+      // Generate runtime wrapper
+      if (this.options.generateRuntime) {
+        runtime = this.generateRuntimeWrapper(tool);
+      }
+
+    } catch (error: unknown) {
+      errors.push(`Error converting tool ${tool.name}: ${error.message}`);
+    }
+
+    return {
+      typescript,
+      interfaces,
+      runtime,
+      errors
+    };
+  }
+
+  private generateInputInterface(tool: ToolInfo): string {
+    if (!tool.inputSchema || tool.inputSchema.type !== 'object') {
+      return '';
+    }
+
+    const interfaceName = this.getInputTypeName(tool);
+    const properties = this.generateObjectProperties(tool.inputSchema);
+
+    return `export interface ${interfaceName} {${properties}
+}`;
+  }
+
+  private generateOutputInterface(tool: ToolInfo): string {
+    if (!tool.outputSchema) {
+      return '';
+    }
+
+    const interfaceName = this.getOutputTypeName(tool);
+    const typeDefinition = this.jsonSchemaToTypeScript(tool.outputSchema);
+
+    if (tool.outputSchema.type === 'object') {
+      const properties = this.generateObjectProperties(tool.outputSchema);
+      return `export interface ${interfaceName} {${properties}
+}`;
+    } else {
+      return `export type ${interfaceName} = ${typeDefinition};`;
+    }
+  }
+
+  private generateInputType(tool: ToolInfo): string {
+    if (!tool.inputSchema) {
+      return 'void';
+    }
+
+    if (this.options.generateInterfaces && tool.inputSchema.type === 'object') {
+      return this.getInputTypeName(tool);
+    }
+
+    return this.jsonSchemaToTypeScript(tool.inputSchema);
+  }
+
+  private generateOutputType(tool: ToolInfo): string {
+    if (!tool.outputSchema) {
+      return 'unknown';
+    }
+
+    if (this.options.generateInterfaces && tool.outputSchema.type === 'object') {
+      return this.getOutputTypeName(tool);
+    }
+
+    return this.jsonSchemaToTypeScript(tool.outputSchema);
+  }
+
+  private getInputTypeName(tool: ToolInfo): string {
+    return `${this.options.typePrefix}${this.pascalCase(tool.name)}Input`;
+  }
+
+  private getOutputTypeName(tool: ToolInfo): string {
+    return `${this.options.typePrefix}${this.pascalCase(tool.name)}Output`;
+  }
+
+  private generateRuntimeWrapper(tool: ToolInfo): string {
+    const methodName = this.camelCase(tool.name);
+    const inputType = this.generateInputType(tool);
+    const outputType = this.generateOutputType(tool);
+
+    return `
+export async function ${methodName}(args: ${inputType}): Promise<${outputType}> {
+${this.options.indentation}return await globalThis.mcp.${tool.serverName}.${tool.name}(args);
+}`;
+  }
+
+  // Convert JSON Schema to TypeScript type
+  private jsonSchemaToTypeScript(schema: JSONSchema7, depth: number = 0): string {
+    if (depth > 10) {
+      return 'any'; // Prevent infinite recursion
+    }
+
+    // Handle references
+    if (schema.$ref) {
+      return 'any'; // For now, treat refs as any
+    }
+
+    // Handle type arrays
+    if (Array.isArray(schema.type)) {
+      return schema.type.map(type => this.jsonSchemaToTypeScript({ type } as JSONSchema7, depth + 1)).join(' | ');
+    }
+
+    switch (schema.type) {
+      case 'string':
+        if (schema.enum) {
+          return schema.enum.map(value => `'${value}'`).join(' | ');
+        }
+        if (schema.const) {
+          return `'${schema.const}'`;
+        }
+        return 'string';
+
+      case 'number':
+      case 'integer':
+        if (schema.enum) {
+          return schema.enum.join(' | ');
+        }
+        if (schema.const !== undefined) {
+          return String(schema.const);
+        }
+        return 'number';
+
+      case 'boolean':
+        if (schema.const !== undefined) {
+          return String(schema.const);
+        }
+        return 'boolean';
+
+      case 'null':
+        return 'null';
+
+      case 'array':
+        if (schema.items) {
+          if (Array.isArray(schema.items)) {
+            // Tuple type
+            const itemTypes = schema.items.map(item => this.jsonSchemaToTypeScript(item, depth + 1));
+            return `[${itemTypes.join(', ')}]`;
+          } else {
+            // Array type
+            const itemType = this.jsonSchemaToTypeScript(schema.items, depth + 1);
+            return `${itemType}[]`;
+          }
+        }
+        return 'unknown[]';
+
+      case 'object':
+        if (schema.properties) {
+          return this.generateInlineObjectType(schema, depth);
+        }
+        if (schema.additionalProperties) {
+          const valueType = typeof schema.additionalProperties === 'object'
+            ? this.jsonSchemaToTypeScript(schema.additionalProperties, depth + 1)
+            : 'unknown';
+          return `Record<string, ${valueType}>`;
+        }
+        return 'Record<string, unknown>';
+
+      default:
+        // Handle oneOf, anyOf, allOf
+        if (schema.oneOf) {
+          return schema.oneOf.map(s => this.jsonSchemaToTypeScript(s, depth + 1)).join(' | ');
+        }
+        if (schema.anyOf) {
+          return schema.anyOf.map(s => this.jsonSchemaToTypeScript(s, depth + 1)).join(' | ');
+        }
+        if (schema.allOf) {
+          return schema.allOf.map(s => this.jsonSchemaToTypeScript(s, depth + 1)).join(' & ');
+        }
+        return 'unknown';
+    }
+  }
+
+  private generateInlineObjectType(schema: JSONSchema7, depth: number): string {
+    const properties = this.generateObjectProperties(schema, depth);
+    return `{${properties}
+${this.options.indentation.repeat(depth)}}`;
+  }
+
+  private generateObjectProperties(schema: JSONSchema7, depth: number = 0): string {
+    if (!schema.properties) {
+      return '';
+    }
+
+    const properties: string[] = [];
+    const required = schema.required || [];
+    const indent = this.options.indentation.repeat(depth + 1);
+
+    for (const [propName, propSchema] of Object.entries(schema.properties)) {
+      if (typeof propSchema === 'boolean') continue;
+
+      const isOptional = this.options.includeOptional && !required.includes(propName);
+      const propType = this.jsonSchemaToTypeScript(propSchema, depth + 1);
+
+      let property = `\n${indent}${propName}${isOptional ? '?' : ''}: ${propType};`;
+
+      // Add property description as comment
+      if (propSchema.description) {
+        property = `\n${indent}/** ${propSchema.description} */` + property;
+      }
+
+      properties.push(property);
+    }
+
+    return properties.join('');
+  }
+
+  // Generate a complete API file for a namespace
+  generateNamespaceFile(namespace: string, tools: ToolInfo[]): string {
+    const converted = this.convertNamespace(namespace, tools);
+
+    const header = `// Generated TypeScript definitions for ${namespace} MCP tools
+// Last updated: ${new Date().toISOString()}
+// Tools: ${tools.map(t => t.name).join(', ')}
+
+`;
+
+    const imports = `import type { MCPToolCall } from './types';
+
+`;
+
+    const interfaces = converted.interfaces ? converted.interfaces + '\n\n' : '';
+    const apiInterface = converted.typescript + '\n\n';
+    const runtimeClass = converted.runtime + '\n\n';
+
+    const exports = `// Export for use
+export { ${this.pascalCase(namespace)}API };
+export type { ${this.pascalCase(namespace)}API as ${this.pascalCase(namespace)}Interface };
+`;
+
+    return header + imports + interfaces + apiInterface + runtimeClass + exports;
+  }
+
+  // Generate a unified API file for all namespaces
+  generateUnifiedAPI(namespaceSchemas: NamespaceSchema[]): string {
+    const header = `// Generated unified TypeScript API for all MCP tools
+// Last updated: ${new Date().toISOString()}
+// Namespaces: ${namespaceSchemas.map(ns => ns.namespace).join(', ')}
+
+`;
+
+    const interfaces = namespaceSchemas
+      .map(ns => ns.interfaces)
+      .filter(Boolean)
+      .join('\n\n') + '\n\n';
+
+    const apiInterfaces = namespaceSchemas
+      .map(ns => ns.typescript)
+      .join('\n\n') + '\n\n';
+
+    const runtimeClasses = namespaceSchemas
+      .map(ns => ns.runtime)
+      .join('\n\n') + '\n\n';
+
+    const unifiedInterface = `
+interface UnifiedMCPAPI {
+${namespaceSchemas.map(ns =>
+  `${this.options.indentation}${ns.namespace}: ${this.pascalCase(ns.namespace)}API;`
+).join('\n')}
+}
+`;
+
+    const factory = `
+// Factory function to create unified API
+export function createUnifiedMCPAPI(callTool: (namespace: string, args: any) => Promise<any>): UnifiedMCPAPI {
+${this.options.indentation}return {
+${namespaceSchemas.map(ns =>
+  `${this.options.indentation}${this.options.indentation}${ns.namespace}: new ${this.pascalCase(ns.namespace)}API(callTool),`
+).join('\n')}
+${this.options.indentation}};
+}
+
+// Global declaration for sandbox use
+declare global {
+${this.options.indentation}const mcp: UnifiedMCPAPI;
+}
+`;
+
+    return header + interfaces + apiInterfaces + runtimeClasses + unifiedInterface + factory;
+  }
+
+  private camelCase(str: string): string {
+    return str.replace(/[-_](.)/g, (_, char) => char.toUpperCase())
+              .replace(/^./, char => char.toLowerCase());
+  }
+
+  private pascalCase(str: string): string {
+    return str.replace(/[-_](.)/g, (_, char) => char.toUpperCase())
+              .replace(/^./, char => char.toUpperCase());
+  }
+
+  // Validate generated TypeScript (basic syntax checking)
+  validateTypeScript(typescript: string): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    // Basic syntax validation
+    try {
+      // Check for basic syntax issues
+      if (!typescript.trim()) {
+        errors.push('Empty TypeScript output');
+      }
+
+      // Check for unmatched braces
+      const openBraces = (typescript.match(/\{/g) || []).length;
+      const closeBraces = (typescript.match(/\}/g) || []).length;
+      if (openBraces !== closeBraces) {
+        errors.push(`Unmatched braces: ${openBraces} open, ${closeBraces} close`);
+      }
+
+      // Check for basic TypeScript keywords
+      if (typescript.includes('interface') || typescript.includes('type') || typescript.includes('declare')) {
+        // Looks like valid TypeScript
+      } else {
+        errors.push('No TypeScript declarations found');
+      }
+
+    } catch (error: unknown) {
+      errors.push(`Validation error: ${error.message}`);
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
+
+  // Get conversion statistics
+  getConversionStats(results: NamespaceSchema[]): {
+    totalNamespaces: number;
+    totalTools: number;
+    totalErrors: number;
+    toolsByNamespace: Record<string, number>;
+    generatedLines: number;
+  } {
+    const totalNamespaces = results.length;
+    let totalTools = 0;
+    let totalErrors = 0;
+    let generatedLines = 0;
+    const toolsByNamespace: Record<string, number> = {};
+
+    for (const result of results) {
+      totalTools += result.tools.length;
+      toolsByNamespace[result.namespace] = result.tools.length;
+
+      // Count lines in generated code
+      generatedLines += result.typescript.split('\n').length;
+      generatedLines += result.interfaces.split('\n').length;
+      generatedLines += result.runtime.split('\n').length;
+    }
+
+    return {
+      totalNamespaces,
+      totalTools,
+      totalErrors,
+      toolsByNamespace,
+      generatedLines
+    };
+  }
+}

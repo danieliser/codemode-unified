@@ -1,0 +1,262 @@
+import { EventEmitter } from 'events';
+import { cpus } from 'os';
+import type { ResourceLimits, ExecutionMetrics } from '../types/core.js';
+
+export interface ResourceUsage {
+  memory: number;
+  cpu: number;
+  executionTime: number;
+  networkCalls: number;
+  filesystemOps: number;
+}
+
+export interface ResourceViolation {
+  type: 'memory' | 'cpu' | 'timeout' | 'network' | 'filesystem';
+  limit: number;
+  actual: number;
+  timestamp: Date;
+  executionId: string;
+}
+
+export class ResourceMonitor extends EventEmitter {
+  private limits: ResourceLimits;
+  private activeExecutions: Map<string, ResourceUsage> = new Map();
+  private violations: ResourceViolation[] = [];
+  private monitoringInterval: NodeJS.Timeout | null = null;
+
+  constructor(limits: ResourceLimits) {
+    super();
+    this.limits = limits;
+    this.startMonitoring();
+  }
+
+  startExecution(executionId: string): void {
+    const initialUsage: ResourceUsage = {
+      memory: 0,
+      cpu: 0,
+      executionTime: 0,
+      networkCalls: 0,
+      filesystemOps: 0
+    };
+
+    this.activeExecutions.set(executionId, initialUsage);
+
+    // Set timeout for execution
+    setTimeout(() => {
+      if (this.activeExecutions.has(executionId)) {
+        this.recordViolation({
+          type: 'timeout',
+          limit: this.limits.timeout,
+          actual: Date.now(),
+          timestamp: new Date(),
+          executionId
+        });
+
+        this.emit('timeout', executionId);
+      }
+    }, this.limits.timeout);
+  }
+
+  updateResourceUsage(executionId: string, usage: Partial<ResourceUsage>): void {
+    const current = this.activeExecutions.get(executionId);
+    if (!current) return;
+
+    const updated = { ...current, ...usage };
+    this.activeExecutions.set(executionId, updated);
+
+    // Check for violations
+    this.checkViolations(executionId, updated);
+  }
+
+  private checkViolations(executionId: string, usage: ResourceUsage): void {
+    // Memory check
+    if (usage.memory > this.limits.memory) {
+      this.recordViolation({
+        type: 'memory',
+        limit: this.limits.memory,
+        actual: usage.memory,
+        timestamp: new Date(),
+        executionId
+      });
+
+      this.emit('memoryViolation', executionId, usage.memory);
+    }
+
+    // CPU check (simplified - based on execution time vs CPU quota)
+    const expectedCpuTime = usage.executionTime * this.limits.cpuQuota;
+    if (usage.cpu > expectedCpuTime) {
+      this.recordViolation({
+        type: 'cpu',
+        limit: expectedCpuTime,
+        actual: usage.cpu,
+        timestamp: new Date(),
+        executionId
+      });
+
+      this.emit('cpuViolation', executionId, usage.cpu);
+    }
+  }
+
+  private recordViolation(violation: ResourceViolation): void {
+    this.violations.push(violation);
+
+    // Keep only last 1000 violations
+    if (this.violations.length > 1000) {
+      this.violations = this.violations.slice(-1000);
+    }
+
+    this.emit('violation', violation);
+  }
+
+  endExecution(executionId: string): ExecutionMetrics | null {
+    const usage = this.activeExecutions.get(executionId);
+    if (!usage) return null;
+
+    this.activeExecutions.delete(executionId);
+
+    const endTime = Date.now();
+    const startTime = endTime - usage.executionTime;
+
+    return {
+      executionTime: usage.executionTime,
+      memoryUsed: usage.memory,
+      cpuTime: usage.cpu,
+      apiCalls: usage.networkCalls + usage.filesystemOps,
+      startTime,
+      endTime
+    };
+  }
+
+  private startMonitoring(): void {
+    this.monitoringInterval = setInterval(() => {
+      this.collectSystemMetrics();
+    }, 1000); // Monitor every second
+  }
+
+  private collectSystemMetrics(): void {
+    const memUsage = process.memoryUsage();
+    const totalMemory = memUsage.heapUsed + memUsage.external;
+
+    // Update all active executions with system metrics
+    for (const [executionId, usage] of this.activeExecutions) {
+      const updatedUsage = {
+        ...usage,
+        memory: Math.max(usage.memory, totalMemory / this.activeExecutions.size),
+        executionTime: usage.executionTime + 1000 // Add 1 second
+      };
+
+      this.activeExecutions.set(executionId, updatedUsage);
+      this.checkViolations(executionId, updatedUsage);
+    }
+  }
+
+  getActiveExecutions(): string[] {
+    return Array.from(this.activeExecutions.keys());
+  }
+
+  getResourceUsage(executionId: string): ResourceUsage | null {
+    return this.activeExecutions.get(executionId) || null;
+  }
+
+  getViolations(limit?: number): ResourceViolation[] {
+    const violations = limit ? this.violations.slice(-limit) : this.violations;
+    return violations.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+  }
+
+  getSystemHealth(): {
+    activeExecutions: number;
+    totalViolations: number;
+    recentViolations: number;
+    memoryPressure: boolean;
+    cpuPressure: boolean;
+  } {
+    const now = Date.now();
+    const recentViolations = this.violations.filter(
+      v => now - v.timestamp.getTime() < 60000 // Last minute
+    ).length;
+
+    const memUsage = process.memoryUsage();
+    const memoryPressure = memUsage.heapUsed > (this.limits.memory * 0.8);
+
+    // Simple CPU pressure detection based on active executions
+    const cpuPressure = this.activeExecutions.size > (cpus().length * 2);
+
+    return {
+      activeExecutions: this.activeExecutions.size,
+      totalViolations: this.violations.length,
+      recentViolations,
+      memoryPressure,
+      cpuPressure
+    };
+  }
+
+  // Force terminate an execution
+  terminateExecution(executionId: string, reason: string): boolean {
+    if (!this.activeExecutions.has(executionId)) {
+      return false;
+    }
+
+    this.activeExecutions.delete(executionId);
+
+    this.emit('executionTerminated', executionId, reason);
+
+    return true;
+  }
+
+  // Update resource limits at runtime
+  updateLimits(newLimits: Partial<ResourceLimits>): void {
+    this.limits = { ...this.limits, ...newLimits };
+    this.emit('limitsUpdated', this.limits);
+  }
+
+  // Get statistics about resource usage
+  getUsageStatistics(): {
+    averageMemory: number;
+    averageCpu: number;
+    averageExecutionTime: number;
+    violationRate: number;
+    activeExecutions: number;
+  } {
+    const usages = Array.from(this.activeExecutions.values());
+
+    if (usages.length === 0) {
+      return {
+        averageMemory: 0,
+        averageCpu: 0,
+        averageExecutionTime: 0,
+        violationRate: 0,
+        activeExecutions: 0
+      };
+    }
+
+    const averageMemory = usages.reduce((sum, u) => sum + u.memory, 0) / usages.length;
+    const averageCpu = usages.reduce((sum, u) => sum + u.cpu, 0) / usages.length;
+    const averageExecutionTime = usages.reduce((sum, u) => sum + u.executionTime, 0) / usages.length;
+
+    // Calculate violation rate (violations per execution)
+    const totalExecutions = this.activeExecutions.size + this.violations.length;
+    const violationRate = totalExecutions > 0 ? this.violations.length / totalExecutions : 0;
+
+    return {
+      averageMemory,
+      averageCpu,
+      averageExecutionTime,
+      violationRate,
+      activeExecutions: usages.length
+    };
+  }
+
+  shutdown(): void {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = null;
+    }
+
+    // Terminate all active executions
+    for (const executionId of this.activeExecutions.keys()) {
+      this.terminateExecution(executionId, 'shutdown');
+    }
+
+    this.removeAllListeners();
+  }
+}

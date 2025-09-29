@@ -1,0 +1,429 @@
+import { randomBytes, createHash } from 'crypto';
+import type {
+
+  AuthContext,
+
+  CapabilitySet
+} from '../types/core.js';
+
+export interface OAuth2Config {
+  clientId: string;
+  clientSecret?: string | undefined; // For confidential clients
+  redirectUri: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  scope: string[];
+  usePKCE: boolean; // OAuth 2.1 requires PKCE
+  state?: string | undefined;
+}
+
+export interface PKCEChallenge {
+  codeVerifier: string;
+  codeChallenge: string;
+  codeChallengeMethod: 'S256';
+}
+
+export interface AuthorizationRequest {
+  authorizationUrl: string;
+  state: string;
+  codeVerifier?: string; // Store for PKCE validation
+  nonce?: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  refresh_token?: string;
+  scope: string;
+  id_token?: string; // For OpenID Connect
+}
+
+export interface UserInfo {
+  sub: string;
+  name?: string;
+  email?: string;
+  picture?: string;
+  preferred_username?: string;
+  scopes: string[];
+}
+
+export class OAuth2Handler {
+  private config: OAuth2Config;
+  private pendingRequests: Map<string, { codeVerifier?: string; nonce?: string }> = new Map();
+
+  constructor(config: OAuth2Config) {
+    this.config = {
+      ...config,
+      usePKCE: true // OAuth 2.1 always uses PKCE
+    };
+  }
+
+  // Generate PKCE challenge for OAuth 2.1
+  private generatePKCEChallenge(): PKCEChallenge {
+    const codeVerifier = this.base64URLEncode(randomBytes(32));
+    const codeChallenge = this.base64URLEncode(
+      createHash('sha256').update(codeVerifier).digest()
+    );
+
+    return {
+      codeVerifier,
+      codeChallenge,
+      codeChallengeMethod: 'S256'
+    };
+  }
+
+  private base64URLEncode(buffer: Buffer): string {
+    return buffer
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+  }
+
+  // Create authorization request URL
+  createAuthorizationRequest(additionalScopes?: string[]): AuthorizationRequest {
+    const state = this.base64URLEncode(randomBytes(16));
+    const nonce = this.base64URLEncode(randomBytes(16));
+    const pkce = this.generatePKCEChallenge();
+
+    // Store PKCE verifier and nonce for later validation
+    this.pendingRequests.set(state, {
+      codeVerifier: pkce.codeVerifier,
+      nonce
+    });
+
+    const scopes = [...this.config.scope, ...(additionalScopes || [])];
+
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: this.config.clientId,
+      redirect_uri: this.config.redirectUri,
+      scope: scopes.join(' '),
+      state,
+      code_challenge: pkce.codeChallenge,
+      code_challenge_method: pkce.codeChallengeMethod,
+      nonce
+    });
+
+    const authorizationUrl = `${this.config.authorizationEndpoint}?${params.toString()}`;
+
+    // Clean up old pending requests (older than 10 minutes)
+    this.cleanupPendingRequests();
+
+    return {
+      authorizationUrl,
+      state,
+      codeVerifier: pkce.codeVerifier,
+      nonce
+    };
+  }
+
+  // Exchange authorization code for tokens
+  async exchangeCodeForTokens(
+    code: string,
+    state: string,
+    receivedState?: string
+  ): Promise<TokenResponse> {
+    // Validate state parameter (CSRF protection)
+    if (state !== receivedState) {
+      throw new Error('Invalid state parameter - possible CSRF attack');
+    }
+
+    const pendingRequest = this.pendingRequests.get(state);
+    if (!pendingRequest) {
+      throw new Error('No pending authorization request found for this state');
+    }
+
+    const { codeVerifier } = pendingRequest;
+    this.pendingRequests.delete(state);
+
+    // Prepare token request
+    const tokenParams = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: this.config.redirectUri,
+      client_id: this.config.clientId,
+      code_verifier: codeVerifier! // PKCE verifier
+    });
+
+    // Add client secret for confidential clients
+    if (this.config.clientSecret) {
+      tokenParams.append('client_secret', this.config.clientSecret);
+    }
+
+    const response = await fetch(this.config.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json'
+      },
+      body: tokenParams.toString()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
+    }
+
+    const tokenResponse = await response.json() as TokenResponse;
+
+    // Validate token response
+    if (!tokenResponse.access_token) {
+      throw new Error('No access token in response');
+    }
+
+    return tokenResponse;
+  }
+
+  // Get user information using access token
+  async getUserInfo(accessToken: string, userInfoEndpoint?: string): Promise<UserInfo> {
+    if (!userInfoEndpoint) {
+      // Try to extract user info from JWT token if it's a JWT
+      try {
+        return this.extractUserInfoFromJWT(accessToken);
+      } catch {
+        throw new Error('No user info endpoint provided and token is not a JWT');
+      }
+    }
+
+    const response = await fetch(userInfoEndpoint, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch user info: ${response.status}`);
+    }
+
+    const userInfo = await response.json() as any;
+
+    return {
+      sub: userInfo.sub as string,
+      name: userInfo.name as string | undefined,
+      email: userInfo.email as string | undefined,
+      picture: userInfo.picture as string | undefined,
+      preferred_username: userInfo.preferred_username as string | undefined,
+      scopes: this.config.scope // Use the originally requested scopes
+    };
+  }
+
+  // Extract user info from JWT token (if the access token is a JWT)
+  private extractUserInfoFromJWT(jwtToken: string): UserInfo {
+    try {
+      const parts = jwtToken.split('.');
+      if (parts.length !== 3) {
+        throw new Error('Invalid JWT format');
+      }
+
+      const payload = JSON.parse(
+        Buffer.from(parts[1], 'base64url').toString('utf8')
+      );
+
+      return {
+        sub: payload.sub,
+        name: payload.name,
+        email: payload.email,
+        picture: payload.picture,
+        preferred_username: payload.preferred_username || payload.username,
+        scopes: payload.scope ? payload.scope.split(' ') : this.config.scope
+      };
+    } catch (error: unknown) {
+      throw new Error(`Failed to parse JWT token: ${(error instanceof Error ? error.message : String(error))}`);
+    }
+  }
+
+  // Create AuthContext from user info and tokens
+  createAuthContext(
+    userInfo: UserInfo,
+    tokenResponse: TokenResponse,
+    capabilities?: CapabilitySet
+  ): AuthContext {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + (tokenResponse.expires_in * 1000));
+
+    return {
+      userId: userInfo.sub,
+      sessionId: this.generateSessionId(),
+      scopes: userInfo.scopes,
+      capabilities: capabilities || this.getDefaultCapabilities(userInfo.scopes),
+      expiresAt,
+      metadata: {
+        name: userInfo.name,
+        email: userInfo.email,
+        picture: userInfo.picture,
+        username: userInfo.preferred_username,
+        tokenType: tokenResponse.token_type,
+        accessToken: tokenResponse.access_token,
+        refreshToken: tokenResponse.refresh_token
+      }
+    };
+  }
+
+  // Determine default capabilities based on user scopes
+  private getDefaultCapabilities(scopes: string[]): CapabilitySet {
+    const capabilities: CapabilitySet = {
+      network: {
+        allowedHosts: [],
+        allowedPorts: [],
+        maxRequestsPerSecond: 0,
+        maxRequestSize: 0
+      },
+      filesystem: {
+        allowedPaths: [],
+        readOnly: true,
+        maxFileSize: 0,
+        allowedExtensions: []
+      },
+      mcp: {
+        allowedServers: [],
+        allowedTools: [],
+        maxCallsPerSecond: 0,
+        maxConcurrentCalls: 0
+      },
+      system: {
+        allowEnvironmentAccess: false,
+        allowProcessSpawn: false,
+        maxProcesses: 0
+      }
+    };
+
+    // Grant capabilities based on scopes
+    if (scopes.includes('code:execute')) {
+      capabilities.mcp!.allowedServers = ['filesystem'];
+      capabilities.mcp!.maxCallsPerSecond = 5;
+      capabilities.mcp!.maxConcurrentCalls = 2;
+    }
+
+    if (scopes.includes('code:network')) {
+      capabilities.network!.allowedHosts = ['api.github.com', 'httpbin.org'];
+      capabilities.network!.allowedPorts = [80, 443];
+      capabilities.network!.maxRequestsPerSecond = 10;
+      capabilities.network!.maxRequestSize = 1024 * 1024; // 1MB
+    }
+
+    if (scopes.includes('code:filesystem')) {
+      capabilities.filesystem!.allowedPaths = ['/tmp'];
+      capabilities.filesystem!.maxFileSize = 1024 * 1024; // 1MB
+      capabilities.filesystem!.allowedExtensions = ['.txt', '.json', '.csv'];
+    }
+
+    if (scopes.includes('admin')) {
+      // Admin users get extended capabilities
+      capabilities.network!.allowedHosts = ['*'];
+      capabilities.network!.allowedPorts = [80, 443, 3000, 8000, 8080];
+      capabilities.network!.maxRequestsPerSecond = 50;
+      capabilities.filesystem!.allowedPaths = ['/tmp', '/var/tmp'];
+      capabilities.filesystem!.readOnly = false;
+      capabilities.mcp!.allowedServers = ['*'];
+      capabilities.mcp!.allowedTools = ['*'];
+      capabilities.system!.allowEnvironmentAccess = true;
+    }
+
+    return capabilities;
+  }
+
+  private generateSessionId(): string {
+    return this.base64URLEncode(randomBytes(24));
+  }
+
+  // Refresh access token using refresh token
+  async refreshTokens(refreshToken: string): Promise<TokenResponse> {
+    if (!this.config.tokenEndpoint) {
+      throw new Error('No token endpoint configured for refresh');
+    }
+
+    const tokenParams = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: this.config.clientId
+    });
+
+    if (this.config.clientSecret) {
+      tokenParams.append('client_secret', this.config.clientSecret);
+    }
+
+    const response = await fetch(this.config.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json'
+      },
+      body: tokenParams.toString()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Token refresh failed: ${response.status} ${errorText}`);
+    }
+
+    return response.json() as Promise<TokenResponse>;
+  }
+
+  // Revoke tokens (logout)
+  async revokeTokens(token: string, tokenTypeHint?: 'access_token' | 'refresh_token'): Promise<void> {
+    // Note: Not all OAuth providers support token revocation
+    const revocationEndpoint = this.config.tokenEndpoint.replace('/token', '/revoke');
+
+    const params = new URLSearchParams({
+      token,
+      client_id: this.config.clientId
+    });
+
+    if (tokenTypeHint) {
+      params.append('token_type_hint', tokenTypeHint);
+    }
+
+    if (this.config.clientSecret) {
+      params.append('client_secret', this.config.clientSecret);
+    }
+
+    try {
+      const response = await fetch(revocationEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: params.toString()
+      });
+
+      if (!response.ok && response.status !== 404) {
+        console.warn(`Token revocation failed: ${response.status}`);
+      }
+    } catch (error: unknown) {
+      console.warn('Token revocation failed:', (error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  private cleanupPendingRequests(): void {
+    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+
+    for (const [state, request] of this.pendingRequests) {
+      // Simple cleanup - in production, you'd want to store timestamps
+      if (this.pendingRequests.size > 100) { // Arbitrary cleanup threshold
+        this.pendingRequests.delete(state);
+      }
+    }
+  }
+
+  // Validate and parse OAuth 2.1 redirect callback
+  parseCallback(callbackUrl: string): { code?: string; state?: string; error?: string; error_description?: string } {
+    const url = new URL(callbackUrl);
+    const params = url.searchParams;
+
+    return {
+      code: params.get('code') || undefined,
+      state: params.get('state') || undefined,
+      error: params.get('error') || undefined,
+      error_description: params.get('error_description') || undefined
+    };
+  }
+
+  // Get configuration for debugging/display
+  getConfig(): Omit<OAuth2Config, 'clientSecret'> {
+    const { clientSecret, ...publicConfig } = this.config;
+    return publicConfig;
+  }
+}
