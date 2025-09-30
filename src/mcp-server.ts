@@ -724,9 +724,25 @@ async function main() {
   // This prevents recursive spawning when codemode is itself an MCP server
   const enableMCPIntegration = process.env.CODEMODE_ENABLE_MCP_INTEGRATION === 'true';
 
+  // Import CodeGenService for TypeScript declaration generation
+  const { CodeGenService } = await import('./codegen/index.js');
+
   if (enableMCPIntegration) {
     console.error('🔌 MCP Integration enabled via CODEMODE_ENABLE_MCP_INTEGRATION');
     await initializeMCPManager();
+
+    // Generate TypeScript declarations after MCP servers are connected
+    if (mcpManager) {
+      try {
+        console.error('🔧 Generating TypeScript declarations for MCP tools...');
+        const codegenService = new CodeGenService(mcpManager);
+        const outputPath = await codegenService.generateDeclarations();
+        console.error(`✅ TypeScript declarations generated: ${outputPath}`);
+      } catch (error) {
+        console.error('⚠️  Failed to generate TypeScript declarations:', error);
+        console.error('   MCP tools will still work, but without IDE autocomplete');
+      }
+    }
   } else {
     console.error('📭 MCP Integration disabled (set CODEMODE_ENABLE_MCP_INTEGRATION=true to enable)');
     console.error('   Running in standalone mode - code execution only');
