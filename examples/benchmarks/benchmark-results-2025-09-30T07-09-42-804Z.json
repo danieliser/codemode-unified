@@ -1,0 +1,232 @@
+{
+  "timestamp": "2025-09-30T07:09:42.805Z",
+  "runtimes": [
+    {
+      "type": "bun",
+      "name": "Bun"
+    },
+    {
+      "type": "deno",
+      "name": "Deno"
+    },
+    {
+      "type": "quickjs",
+      "name": "QuickJS"
+    }
+  ],
+  "testSuites": [
+    "compute",
+    "async",
+    "dataProcessing"
+  ],
+  "results": {
+    "bun": {
+      "compute": [
+        {
+          "name": "Simple Expression",
+          "success": true,
+          "time": 12
+        },
+        {
+          "name": "Array Operations",
+          "success": true,
+          "time": 14
+        },
+        {
+          "name": "String Manipulation",
+          "success": true,
+          "time": 22
+        },
+        {
+          "name": "Object Operations",
+          "success": true,
+          "time": 14
+        },
+        {
+          "name": "Fibonacci (n=20)",
+          "success": true,
+          "time": 19
+        }
+      ],
+      "async": [
+        {
+          "name": "Single Fetch",
+          "success": true,
+          "time": 3277
+        },
+        {
+          "name": "Parallel Fetches (2)",
+          "success": true,
+          "time": 146
+        },
+        {
+          "name": "Parallel Fetches (4)",
+          "success": true,
+          "time": 162
+        },
+        {
+          "name": "Sequential Fetches (3)",
+          "success": true,
+          "time": 274
+        }
+      ],
+      "dataProcessing": [
+        {
+          "name": "JSON Parse/Stringify",
+          "success": true,
+          "time": 22
+        },
+        {
+          "name": "Array Filtering",
+          "success": true,
+          "time": 25
+        },
+        {
+          "name": "Object Transformation",
+          "success": true,
+          "time": 26
+        }
+      ]
+    },
+    "deno": {
+      "compute": [
+        {
+          "name": "Simple Expression",
+          "success": true,
+          "time": 31
+        },
+        {
+          "name": "Array Operations",
+          "success": true,
+          "time": 35
+        },
+        {
+          "name": "String Manipulation",
+          "success": true,
+          "time": 35
+        },
+        {
+          "name": "Object Operations",
+          "success": true,
+          "time": 32
+        },
+        {
+          "name": "Fibonacci (n=20)",
+          "success": true,
+          "time": 36
+        }
+      ],
+      "async": [
+        {
+          "name": "Single Fetch",
+          "success": true,
+          "time": 226
+        },
+        {
+          "name": "Parallel Fetches (2)",
+          "success": true,
+          "time": 248
+        },
+        {
+          "name": "Parallel Fetches (4)",
+          "success": true,
+          "time": 305
+        },
+        {
+          "name": "Sequential Fetches (3)",
+          "success": true,
+          "time": 408
+        }
+      ],
+      "dataProcessing": [
+        {
+          "name": "JSON Parse/Stringify",
+          "success": true,
+          "time": 24
+        },
+        {
+          "name": "Array Filtering",
+          "success": true,
+          "time": 32
+        },
+        {
+          "name": "Object Transformation",
+          "success": true,
+          "time": 35
+        }
+      ]
+    },
+    "quickjs": {
+      "compute": [
+        {
+          "name": "Simple Expression",
+          "success": true,
+          "time": 7
+        },
+        {
+          "name": "Array Operations",
+          "success": true,
+          "time": 1
+        },
+        {
+          "name": "String Manipulation",
+          "success": true,
+          "time": 1
+        },
+        {
+          "name": "Object Operations",
+          "success": true,
+          "time": 3
+        },
+        {
+          "name": "Fibonacci (n=20)",
+          "success": false,
+          "time": 3,
+          "error": "SyntaxError: return not in a function"
+        }
+      ],
+      "async": [
+        {
+          "name": "Single Fetch",
+          "skipped": true,
+          "reason": "QuickJS does not support native async"
+        },
+        {
+          "name": "Parallel Fetches (2)",
+          "skipped": true,
+          "reason": "QuickJS does not support native async"
+        },
+        {
+          "name": "Parallel Fetches (4)",
+          "skipped": true,
+          "reason": "QuickJS does not support native async"
+        },
+        {
+          "name": "Sequential Fetches (3)",
+          "skipped": true,
+          "reason": "QuickJS does not support native async"
+        }
+      ],
+      "dataProcessing": [
+        {
+          "name": "JSON Parse/Stringify",
+          "success": false,
+          "time": 1,
+          "error": "SyntaxError: return not in a function"
+        },
+        {
+          "name": "Array Filtering",
+          "success": false,
+          "time": 1,
+          "error": "SyntaxError: return not in a function"
+        },
+        {
+          "name": "Object Transformation",
+          "success": false,
+          "time": 1,
+          "error": "SyntaxError: return not in a function"
+        }
+      ]
+    }
+  }
+}
