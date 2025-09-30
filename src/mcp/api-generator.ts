@@ -326,7 +326,18 @@ globalThis.mcp = new Proxy({}, {
 
         return async (...args) => {
           const fullNamespace = \`\${namespace}.\${toolName}\`;
-          return await mcpRuntime.callTool(fullNamespace, args[0] || {});
+          const callId = Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+          const placeholder = \`"__MCP_RESULT_\${callId}__"\`;
+
+          // Log the MCP call for tracking
+          console.log('MCP_CALL_TRACKING: ' + JSON.stringify({
+            id: callId,
+            namespace: fullNamespace,
+            args: args[0] || {}
+          }));
+
+          // Return placeholder string for sync/async bridging
+          return placeholder;
         };
       }
     });

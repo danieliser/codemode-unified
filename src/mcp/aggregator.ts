@@ -6,6 +6,9 @@ import type {
   ToolInfo,
   HealthStatus
 } from '../types/core.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 
 export interface MCPConnection {
   name: string;
@@ -53,6 +56,22 @@ export class MCPAggregator extends EventEmitter {
   private async connectServer(name: string, config: MCPServerConfig): Promise<void> {
     console.log(`🔗 Connecting to MCP server: ${name}`);
 
+    // Clean up existing connection if it exists
+    const existingConnection = this.connections.get(name);
+    if (existingConnection?.client) {
+      console.log(`🧹 Cleaning up existing connection to ${name}`);
+      try {
+        if (typeof existingConnection.client.close === 'function') {
+          await existingConnection.client.close();
+        }
+        if (existingConnection.client.process) {
+          existingConnection.client.process.kill('SIGTERM');
+        }
+      } catch (error) {
+        console.warn(`Failed to cleanup ${name}:`, error);
+      }
+    }
+
     const connection: MCPConnection = {
       name,
       config,
@@ -60,7 +79,7 @@ export class MCPAggregator extends EventEmitter {
       status: 'connecting',
       lastSeen: new Date(),
       tools: new Map(),
-      retryCount: 0
+      retryCount: existingConnection?.retryCount || 0 // Preserve retry count
     };
 
     this.connections.set(name, connection);
@@ -109,25 +128,54 @@ export class MCPAggregator extends EventEmitter {
   }
 
   private async createStdioClient(config: MCPServerConfig): Promise<any> {
-    // Placeholder for stdio MCP client
+    // Resolve command if it's not an absolute path
+    // This fixes "spawn npx ENOENT" errors when PATH is not inherited
+    let resolvedCommand = config.command;
+    if (!resolvedCommand.startsWith('/')) {
+      try {
+        const { execSync } = await import('child_process');
+        resolvedCommand = execSync(`which ${config.command}`, { encoding: 'utf-8' }).trim();
+      } catch (error) {
+        console.warn(`Could not resolve command ${config.command}, using as-is`);
+      }
+    }
+
+    // Merge environment variables - include parent process.env for PATH
+    const mergedEnv = { ...process.env, ...(config.environment || {}) };
+
+    // Create real MCP client with stdio transport
+    const transport = new StdioClientTransport({
+      command: resolvedCommand,
+      args: config.args || [],
+      env: mergedEnv  // Pass full environment including PATH
+    });
+
+    const client = new Client({
+      name: `codemode-unified-client`,
+      version: '0.1.0'
+    });
+
+    await client.connect(transport);
+
+    // Wrap client to match our interface
     return {
       type: 'stdio',
-      command: config.command,
+      command: resolvedCommand,
       args: config.args || [],
-      listTools: async () => [
-        {
-          name: 'example_tool',
-          description: 'Example tool for testing',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: 'Search query' }
-            }
-          }
-        }
-      ],
+      client,
+      transport,
+      process: (transport as any)._process, // Access underlying process if available
+      listTools: async () => {
+        const response = await client.listTools();
+        return response.tools || [];
+      },
       callTool: async (name: string, args: any) => {
-        return { result: `Tool ${name} called with args: ${JSON.stringify(args)}` };
+        const response = await client.callTool({ name, arguments: args });
+        return response;
+      },
+      close: async () => {
+        await client.close();
+        // Transport cleanup is handled by client.close()
       }
     };
   }
@@ -194,8 +242,9 @@ export class MCPAggregator extends EventEmitter {
   }
 
   private updateRegistry(connection: MCPConnection): void {
-    // Update server info
-    const serverInfo: ServerInfo = {
+    // Check if this is an actual change before updating
+    const existingServer = this.registry.servers.get(connection.name);
+    const newServerInfo: ServerInfo = {
       name: connection.name,
       status: connection.status as 'connected' | 'disconnected' | 'error',
       config: connection.config,
@@ -204,23 +253,33 @@ export class MCPAggregator extends EventEmitter {
       lastSeen: connection.lastSeen
     };
 
-    this.registry.servers.set(connection.name, serverInfo);
+    // Only emit registryUpdated if there are actual changes
+    const hasChanges = !existingServer ||
+      existingServer.status !== newServerInfo.status ||
+      existingServer.toolCount !== newServerInfo.toolCount ||
+      existingServer.health?.status !== newServerInfo.health?.status;
 
-    // Update tools registry
-    for (const [toolName, toolInfo] of connection.tools) {
-      const namespacedName = toolInfo.namespace;
-      this.registry.tools.set(namespacedName, toolInfo);
+    this.registry.servers.set(connection.name, newServerInfo);
 
-      // Update namespace mapping
+    // Update tools registry only if tools changed
+    if (!existingServer || existingServer.toolCount !== newServerInfo.toolCount) {
+      // Clear existing tools for this namespace
       const namespace = connection.name;
-      if (!this.registry.namespaces.has(namespace)) {
-        this.registry.namespaces.set(namespace, []);
+      this.registry.namespaces.set(namespace, []);
+
+      // Re-add current tools
+      for (const [toolName, toolInfo] of connection.tools) {
+        const namespacedName = toolInfo.namespace;
+        this.registry.tools.set(namespacedName, toolInfo);
+        this.registry.namespaces.get(namespace)!.push(namespacedName);
       }
-      this.registry.namespaces.get(namespace)!.push(namespacedName);
     }
 
-    this.registry.lastUpdated = new Date();
-    this.emit('registryUpdated', this.registry);
+    // Only emit if there were actual changes
+    if (hasChanges) {
+      this.registry.lastUpdated = new Date();
+      this.emit('registryUpdated', this.registry);
+    }
   }
 
   private getHealthStatus(connection: MCPConnection): HealthStatus {

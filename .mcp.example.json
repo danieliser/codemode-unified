@@ -1,0 +1,34 @@
+{
+  "$comment": "Copy this file to .mcp.json and configure your MCP servers",
+  "$note": ".mcp.json is gitignored to prevent committing API keys",
+  "mcpServers": {
+    "automem": {
+      "type": "stdio",
+      "comment": "Memory storage with embeddings - OPTIONAL",
+      "command": "node",
+      "args": ["/path/to/mcp-automem/dist/index.js"],
+      "env": {
+        "AUTOMEM_ENDPOINT": "http://127.0.0.1:8001",
+        "AUTOMEM_API_KEY": "your-api-key-here",
+        "OPENAI_API_KEY": "your-openai-key-here"
+      },
+      "disabled": true
+    },
+    "sequential-thinking": {
+      "type": "stdio",
+      "comment": "Complex reasoning - OPTIONAL",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "env": {},
+      "disabled": false
+    },
+    "context7": {
+      "type": "stdio",
+      "comment": "Library documentation - OPTIONAL",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "env": {},
+      "disabled": false
+    }
+  }
+}

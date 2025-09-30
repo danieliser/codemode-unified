@@ -5,11 +5,37 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "codemode": "dist/cli.js",
+    "codemode-mcp": "dist/mcp-server.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./mcp": "./dist/mcp-server.js",
+    "./runtime": "./dist/runtime/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "dev:quickjs": "tsx watch src/server.ts --runtime=quickjs",
+    "dev:bun": "tsx watch src/server.ts --runtime=bun",
+    "dev:deno": "tsx watch src/server.ts --runtime=deno",
+    "dev:mcp": "tsx src/mcp-server.ts",
+    "build": "tsc && chmod +x dist/mcp-server.js",
     "start": "node dist/server.js",
+    "start:mcp": "node dist/mcp-server.js",
     "test": "vitest",
+    "test:runtimes": "vitest run src/runtime/__tests__/runtime-suite.test.ts",
+    "test:constraints": "vitest run src/runtime/__tests__/constraints.test.ts",
+    "test:runtime:quickjs": "vitest run src/runtime/__tests__/runtime-suite.test.ts -t QuickJS",
+    "test:runtime:bun": "vitest run src/runtime/__tests__/runtime-suite.test.ts -t Bun",
+    "test:runtime:deno": "vitest run src/runtime/__tests__/runtime-suite.test.ts -t Deno",
+    "test:runtime:isolated-vm": "vitest run src/runtime/__tests__/runtime-suite.test.ts -t isolated-vm",
+    "test:runtime:e2b": "vitest run src/runtime/__tests__/runtime-suite.test.ts -t E2B",
     "test:coverage": "vitest --coverage",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit",

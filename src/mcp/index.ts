@@ -169,6 +169,7 @@ const mcpRuntime = new MCPRuntime(window.__mcpAggregator);
     await this.regenerateAPIs();
   }
 
+
   // Health check for all servers
   async healthCheck(): Promise<{ server: string; status: string; tools: number }[]> {
     const servers = this.getServerStatus();

@@ -65,7 +65,21 @@ export class CodeModeExecutor extends EventEmitter {
       if (this.mcpConfigPath) {
         try {
           const mcpConfigData = await import('fs/promises').then(fs => fs.readFile(this.mcpConfigPath!, 'utf-8'));
-          mcpConfig = JSON.parse(mcpConfigData);
+          const loadedConfig = JSON.parse(mcpConfigData);
+
+          // Handle both {mcpServers: ...} and {servers: ...} formats
+          const servers = loadedConfig.mcpServers || loadedConfig.servers || {};
+
+          // Map 'type' field to 'transport' for each server config
+          const normalizedServers: Record<string, any> = {};
+          for (const [name, config] of Object.entries(servers)) {
+            normalizedServers[name] = {
+              ...(config as any),
+              transport: (config as any).type || (config as any).transport
+            };
+          }
+
+          mcpConfig = { servers: normalizedServers };
           console.log(`📄 Loaded MCP configuration from ${this.mcpConfigPath}`);
         } catch (error) {
           console.warn(`⚠️  Failed to load MCP config from ${this.mcpConfigPath}:`, error);
@@ -155,8 +169,14 @@ export class CodeModeExecutor extends EventEmitter {
       // Prepare execution code
       const fullCode = this.prepareExecutionCode(request.code, sandboxInjection);
 
-      // Execute in sandbox
+      // Execute in sandbox (first pass to capture MCP calls)
       const result = await this.sandbox.execute(fullCode, {
+        ...request.options,
+        capabilities: securityResult.effectiveCapabilities
+      });
+
+      // Process any MCP calls that were made during execution
+      const processedResult = await this.processMCPCalls(result, request.code, sandboxInjection, {
         ...request.options,
         capabilities: securityResult.effectiveCapabilities
       });
@@ -166,7 +186,7 @@ export class CodeModeExecutor extends EventEmitter {
 
       // Merge metrics
       const finalResult: ExecutionResult = {
-        ...result,
+        ...processedResult,
         metrics: {
           ...result.metrics,
           ...securityMetrics
@@ -331,15 +351,12 @@ globalThis.__mcpCallTool = function(namespace, args) {
 
   globalThis.__mcpCalls.push(call);
 
-  // Return a synchronous mock response for now
-  // In a full implementation, this would be async with proper bridging
-  return {
-    success: true,
-    result: \`MCP Tool \${namespace} called with args: \${JSON.stringify(args)}\`,
-    namespace: namespace,
-    callId: callId,
-    timestamp: call.timestamp
-  };
+  // Log the call for processing
+  console.log('MCP_CALL_TRACKING: ' + JSON.stringify(call));
+
+  // Return a simple placeholder that can be assigned to variables
+  // The actual result will be substituted post-execution
+  return '__MCP_RESULT_' + callId + '__';
 };
 
 // MCP Global Object
@@ -575,6 +592,105 @@ try {
     this.initialized = false;
 
     console.log('✅ Code Mode Executor shutdown complete');
+  }
+
+  private async processMCPCalls(
+    result: ExecutionResult,
+    originalCode: string,
+    sandboxInjection: string,
+    executionOptions: any
+  ): Promise<ExecutionResult> {
+    if (!this.mcpManager || !result.logs) {
+      return result;
+    }
+
+    // Extract MCP calls from tracking logs
+    const trackingLogs = result.logs.filter(log => log.startsWith('MCP_CALL_TRACKING: '));
+    if (trackingLogs.length === 0) {
+      return result;
+    }
+
+    try {
+      // Parse all MCP calls from tracking logs
+      const mcpCalls = trackingLogs.map(log => {
+        const callData = log.replace('MCP_CALL_TRACKING: ', '');
+        return JSON.parse(callData);
+      });
+
+      console.log(`Processing ${mcpCalls.length} MCP calls...`);
+
+      const mcpResults = [];
+      const callMap = new Map<number, any>();
+
+      // Execute all MCP calls and collect results
+      for (const call of mcpCalls) {
+        try {
+          console.log(`Calling MCP tool: ${call.namespace} with args:`, call.args);
+          const mcpResult = await this.mcpManager.callTool(call.namespace, call.args);
+
+          mcpResults.push({
+            callId: call.id,
+            namespace: call.namespace,
+            success: true,
+            result: mcpResult
+          });
+
+          callMap.set(call.id, mcpResult);
+          console.log(`MCP tool ${call.namespace} returned:`, mcpResult);
+        } catch (error) {
+          console.error(`MCP tool call failed for ${call.namespace}:`, error);
+          const errorResult = {
+            callId: call.id,
+            namespace: call.namespace,
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          };
+          mcpResults.push(errorResult);
+          callMap.set(call.id, { error: errorResult.error });
+        }
+      }
+
+      // Inject MCP results into globalThis for second pass execution
+      console.log(`Injecting ${callMap.size} MCP results into globalThis...`);
+
+      // Create modified sandbox injection that includes MCP results
+      const mcpResultsInjection = `
+globalThis.__mcpResults = ${JSON.stringify(Object.fromEntries(callMap))};
+`;
+
+      // Prepend MCP results to the sandbox injection
+      const modifiedSandboxInjection = mcpResultsInjection + sandboxInjection.replace(
+        'return \'__MCP_RESULT_\' + callId + \'__\';',
+        `if (globalThis.__mcpResults && globalThis.__mcpResults[callId]) {
+    return globalThis.__mcpResults[callId];
+  }
+  return '__MCP_RESULT_' + callId + '__';`
+      );
+
+      // Re-execute with the actual MCP results available
+      if (mcpResults.length > 0) {
+        console.log('Re-executing code with MCP results injected into globalThis...');
+
+        const fullModifiedCode = this.prepareExecutionCode(originalCode, modifiedSandboxInjection);
+        const finalResult = await this.sandbox.execute(fullModifiedCode, executionOptions);
+
+        return {
+          ...finalResult,
+          mcpCalls: mcpResults,
+          logs: [...(result.logs || []), ...(finalResult.logs || [])]
+        };
+      }
+
+      // No MCP results to process
+      return {
+        ...result,
+        mcpCalls: mcpResults
+      };
+
+    } catch (error) {
+      console.error('Error processing MCP calls:', error);
+      return result;
+    }
   }
 }
 

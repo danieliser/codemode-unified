@@ -33,6 +33,11 @@ logs
 config.yaml
 config.json
 
+# MCP config with secrets (keep .mcp.example.json for reference)
+**/.mcp.json
+**/.mcp.*.json
+!**/.mcp.example.json
+
 # Generated schemas
 generated/
 

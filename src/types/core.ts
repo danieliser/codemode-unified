@@ -29,6 +29,13 @@ export interface ExecutionResult {
   metrics: ExecutionMetrics;
   logs: string[];
   requestId: string;
+  mcpCalls?: Array<{
+    namespace: string;
+    toolName: string;
+    args: unknown;
+    result: unknown;
+    executionTime: number;
+  }>;
 }
 
 export interface ExecutionMetrics {

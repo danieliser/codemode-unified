@@ -232,13 +232,8 @@ export class QuickJSSandbox {
 
           if (value) {
             try {
-              jsValue = context.getString(value);
-              // Try to parse as JSON for structured data
-              try {
-                jsValue = JSON.parse(jsValue as string);
-              } catch {
-                // Keep as string if not valid JSON
-              }
+              // Use dump() to properly serialize objects/arrays
+              jsValue = context.dump(value);
             } catch {
               jsValue = undefined;
             }
@@ -396,6 +391,10 @@ export class QuickJSSandbox {
 
   private generateRequestId(): string {
     return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  getWorkerCount(): number {
+    return this.workers.size;
   }
 
   async shutdown(): Promise<void> {
