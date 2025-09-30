@@ -141,7 +141,7 @@ export class MCPAggregator extends EventEmitter {
     }
 
     // Merge environment variables - include parent process.env for PATH
-    const mergedEnv = { ...process.env, ...(config.environment || {}) };
+    const mergedEnv = { ...process.env, ...(config.env || {}) };
 
     // Create real MCP client with stdio transport
     const transport = new StdioClientTransport({
@@ -214,16 +214,30 @@ export class MCPAggregator extends EventEmitter {
     try {
       const tools = await connection.client.listTools();
 
+      console.log(`\n🔍 [TOOL DISCOVERY] Server: ${connection.name}`);
+      console.log(`📋 [TOOL DISCOVERY] Found ${tools.length} tools`);
+
       connection.tools.clear();
 
       for (const tool of tools) {
+        const namespace = this.generateNamespace(connection.name, tool.name);
+
+        console.log(`  ✨ [TOOL] Original: "${tool.name}" → Namespace: "${namespace}"`);
+        if (tool.description) {
+          console.log(`     📝 Description: ${tool.description.substring(0, 100)}${tool.description.length > 100 ? '...' : ''}`);
+        }
+        if (tool.inputSchema) {
+          const params = tool.inputSchema.properties ? Object.keys(tool.inputSchema.properties) : [];
+          console.log(`     📥 Parameters: [${params.join(', ')}]`);
+        }
+
         const toolInfo: ToolInfo = {
           name: tool.name,
           serverName: connection.name,
           description: tool.description,
           inputSchema: tool.inputSchema,
           outputSchema: tool.outputSchema,
-          namespace: this.generateNamespace(connection.name, tool.name),
+          namespace: namespace,
           metadata: tool.metadata || {}
         };
 
@@ -241,13 +255,35 @@ export class MCPAggregator extends EventEmitter {
     return `${serverName}.${toolName}`;
   }
 
+  private maskEnvironmentVariables(env: Record<string, any>): Record<string, string> {
+    // Mask all environment variable values for security
+    const masked: Record<string, string> = {};
+    for (const key of Object.keys(env)) {
+      const value = String(env[key]);
+      if (value.length <= 4) {
+        masked[key] = '***';
+      } else {
+        // Show first 4 chars + '...' for longer values
+        masked[key] = value.substring(0, 4) + '***';
+      }
+    }
+    return masked;
+  }
+
   private updateRegistry(connection: MCPConnection): void {
     // Check if this is an actual change before updating
     const existingServer = this.registry.servers.get(connection.name);
+
+    // Create a sanitized config for health checks (mask environment variables)
+    const sanitizedConfig = {
+      ...connection.config,
+      env: this.maskEnvironmentVariables(connection.config.env || {})
+    };
+
     const newServerInfo: ServerInfo = {
       name: connection.name,
       status: connection.status as 'connected' | 'disconnected' | 'error',
-      config: connection.config,
+      config: sanitizedConfig,
       health: this.getHealthStatus(connection),
       toolCount: connection.tools.size,
       lastSeen: connection.lastSeen

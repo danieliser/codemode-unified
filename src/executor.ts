@@ -70,13 +70,16 @@ export class CodeModeExecutor extends EventEmitter {
           // Handle both {mcpServers: ...} and {servers: ...} formats
           const servers = loadedConfig.mcpServers || loadedConfig.servers || {};
 
-          // Map 'type' field to 'transport' for each server config
+          // Normalize 'type' field to 'transport' for each server config
           const normalizedServers: Record<string, any> = {};
           for (const [name, config] of Object.entries(servers)) {
+            const cfg = config as any;
             normalizedServers[name] = {
-              ...(config as any),
-              transport: (config as any).type || (config as any).transport
+              ...cfg,
+              transport: cfg.type || cfg.transport || 'stdio'
             };
+            // Remove the 'type' field alias
+            delete normalizedServers[name].type;
           }
 
           mcpConfig = { servers: normalizedServers };

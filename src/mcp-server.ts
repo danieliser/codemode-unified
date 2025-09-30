@@ -119,9 +119,19 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
         continue;
       }
 
+      // Debug logging for config conversion
+      console.log(`🔍 [CONVERTER] Processing server: ${name}`);
+      console.log(`🔍 [CONVERTER] Raw config.env keys:`, Object.keys(config.env || {}));
+      console.log(`🔍 [CONVERTER] Raw config.env values (first 20 chars):`,
+        Object.entries(config.env || {}).reduce((acc, [k, v]) => {
+          acc[k] = typeof v === 'string' ? v.substring(0, 20) + '...' : v;
+          return acc;
+        }, {} as Record<string, any>)
+      );
+
       servers[name] = {
         name,
-        transport: config.type || 'stdio',
+        transport: config.transport || config.type || 'stdio', // Try transport first, then type, then default to stdio
         command: config.command,
         args: config.args || [],
         environment: config.env || {},
@@ -133,6 +143,8 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
           retryOn: ['ECONNREFUSED', 'TIMEOUT']
         }
       };
+
+      console.log(`🔍 [CONVERTER] Converted environment keys:`, Object.keys(servers[name].environment));
     }
   }
 

@@ -114,7 +114,7 @@ export interface MCPServerConfig {
   command?: string;
   args?: string[];
   url?: string;
-  environment?: Record<string, string>;
+  env?: Record<string, string>;  // Use 'env' to match .mcp.json format and SDK expectations
   auth?: AuthConfig;
   timeout?: number;
   retryPolicy?: RetryPolicy;

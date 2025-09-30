@@ -194,17 +194,34 @@ async function startServer() {
 
     // MCP Bridge endpoint (for Claude integration)
     fastify.post('/mcp/execute', async (request, reply) => {
-      const body = request.body as any;
+      const authContext = await authenticate(request, reply);
+      if (!authContext && config.security.auth.provider === 'jwt') return;
 
-      // Transform MCP request to execution request
-      const executionRequest: ExecutionRequest = {
-        code: body.arguments?.code || body.code,
-        options: body.arguments?.options || {},
-        requestId: body.id
-      };
+      const body = request.body as any;
+      const { server, tool, arguments: toolArgs } = body;
+
+      if (!server || !tool) {
+        reply.code(400).send({
+          content: [
+            {
+              type: 'text',
+              text: 'Error: Missing required fields: server and tool'
+            }
+          ]
+        });
+        return;
+      }
 
       try {
-        const result = await executor.execute(executionRequest);
+        // Call MCP tool directly using namespace format
+        const namespace = `${server}.${tool}`;
+        const mcpManager = (executor as any).mcpManager;
+
+        if (!mcpManager) {
+          throw new Error('MCP Manager not initialized');
+        }
+
+        const result = await mcpManager.callTool(namespace, toolArgs || {});
 
         // Transform to MCP response format
         const mcpResponse = {
