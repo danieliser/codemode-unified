@@ -166,9 +166,27 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
 }
 
 /**
+ * Load TypeScript declarations from generated file
+ */
+function loadTypeScriptDeclarations(): string {
+  try {
+    const { readFileSync, existsSync } = require('fs');
+    const { join } = require('path');
+    const declPath = join(__dirname, '../generated/mcp.d.ts');
+
+    if (existsSync(declPath)) {
+      return readFileSync(declPath, 'utf-8');
+    }
+  } catch (error) {
+    console.error('⚠️  Could not load TypeScript declarations:', error);
+  }
+  return '';
+}
+
+/**
  * Generate MCP proxy code to inject into sandbox
  */
-function generateMCPProxy(): string {
+function generateMCPProxy(includeTypes: boolean = false): string {
   if (!mcpManager) {
     return ''; // No MCP tools available
   }
@@ -181,6 +199,18 @@ function generateMCPProxy(): string {
   // Debug: Log available tools
   console.error('🔍 Available MCP tools:', tools.map(t => ({ name: t.name, namespace: t.namespace })));
 
+  let proxyCode = '';
+
+  // Prepend TypeScript declarations if requested
+  if (includeTypes) {
+    const typeDeclarations = loadTypeScriptDeclarations();
+    if (typeDeclarations) {
+      proxyCode += `// TypeScript declarations for MCP tools\n`;
+      proxyCode += `// @ts-ignore - declarations injected at runtime\n`;
+      proxyCode += typeDeclarations + '\n\n';
+    }
+  }
+
   // Group tools by namespace
   const byNamespace = new Map<string, typeof tools>();
   for (const tool of tools) {
@@ -192,7 +222,7 @@ function generateMCPProxy(): string {
   }
 
   // Generate proxy object
-  let proxyCode = 'const mcp = {\n';
+  proxyCode += 'const mcp = {\n';
 
   for (const [namespace, nsTools] of byNamespace.entries()) {
     // Quote namespace if it contains special characters (like hyphens)
@@ -371,6 +401,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check runtime capabilities
         const capabilities = rt.getCapabilities();
         const supportsAsync = capabilities.supportsAsync;
+        const supportsTypeScript = capabilities.supportsTypeScript;
 
         // Inject MCP proxy if available
         let enhancedCode = code;
@@ -389,8 +420,8 @@ async function __mcpCall(namespace, args) {
 }
 
 `;
-          // Generate and prepend MCP proxy
-          const mcpProxy = generateMCPProxy();
+          // Generate and prepend MCP proxy (with types for TypeScript-aware runtimes)
+          const mcpProxy = generateMCPProxy(supportsTypeScript);
           enhancedCode = mcpHandler + mcpProxy + code;
 
           // Debug: Log generated code structure to file AND stderr

@@ -1,6 +1,6 @@
 /**
  * Auto-generated TypeScript declarations for MCP tools
- * Generated: 2025-09-30T10:38:01.737Z
+ * Generated: 2025-09-30T10:43:39.406Z
  *
  * This file provides type-safe access to all MCP server tools
  * available in the codemode-unified execution environment.
@@ -158,32 +158,6 @@ export interface AutomemCheckDatabaseHealthArgs {
   [k: string]: unknown;
 }
 
-/** Generated from context7.resolve-library-id schema */
-
-export interface Context7ResolveLibraryIdArgs {
-  /**
-   * Library name to search for and retrieve a Context7-compatible library ID.
-   */
-  libraryName: string;
-}
-
-/** Generated from context7.get-library-docs schema */
-
-export interface Context7GetLibraryDocsArgs {
-  /**
-   * Exact Context7-compatible library ID (e.g., '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') retrieved from 'resolve-library-id' or directly from user query in the format '/org/project' or '/org/project/version'.
-   */
-  context7CompatibleLibraryID: string;
-  /**
-   * Topic to focus documentation on (e.g., 'hooks', 'routing').
-   */
-  topic?: string;
-  /**
-   * Maximum number of tokens of documentation to retrieve (default: 5000). Higher values provide more context but consume more tokens.
-   */
-  tokens?: number;
-}
-
 /** Generated from sequential-thinking.sequentialthinking schema */
 
 export interface SequentialThinkingSequentialthinkingArgs {
@@ -224,6 +198,32 @@ export interface SequentialThinkingSequentialthinkingArgs {
    */
   needsMoreThoughts?: boolean;
   [k: string]: unknown;
+}
+
+/** Generated from context7.resolve-library-id schema */
+
+export interface Context7ResolveLibraryIdArgs {
+  /**
+   * Library name to search for and retrieve a Context7-compatible library ID.
+   */
+  libraryName: string;
+}
+
+/** Generated from context7.get-library-docs schema */
+
+export interface Context7GetLibraryDocsArgs {
+  /**
+   * Exact Context7-compatible library ID (e.g., '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') retrieved from 'resolve-library-id' or directly from user query in the format '/org/project' or '/org/project/version'.
+   */
+  context7CompatibleLibraryID: string;
+  /**
+   * Topic to focus documentation on (e.g., 'hooks', 'routing').
+   */
+  topic?: string;
+  /**
+   * Maximum number of tokens of documentation to retrieve (default: 5000). Higher values provide more context but consume more tokens.
+   */
+  tokens?: number;
 }
 
 /** Generated from claude-code.Task schema */
@@ -532,6 +532,12 @@ declare global {
        */
       check_database_health(args: AutomemCheckDatabaseHealthArgs): Promise<MCPToolResult>;
     };
+    "sequential-thinking": {
+      /**
+       * A detailed tool for dynamic and reflective problem-solving through thoughts.
+       */
+      sequentialthinking(args: SequentialThinkingSequentialthinkingArgs): Promise<MCPToolResult>;
+    };
     context7: {
       /**
        * Resolves a package/product name to a Context7-compatible library ID and returns a list of matching libraries.
@@ -541,12 +547,6 @@ declare global {
        * Fetches up-to-date documentation for a library.
        */
       "get-library-docs"(args: Context7GetLibraryDocsArgs): Promise<MCPToolResult>;
-    };
-    "sequential-thinking": {
-      /**
-       * A detailed tool for dynamic and reflective problem-solving through thoughts.
-       */
-      sequentialthinking(args: SequentialThinkingSequentialthinkingArgs): Promise<MCPToolResult>;
     };
     "claude-code": {
       /**
