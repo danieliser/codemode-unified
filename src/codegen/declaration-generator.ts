@@ -150,7 +150,9 @@ export class DeclarationGenerator {
     namespace += '  const mcp: {\n';
 
     for (const [serverName, tools] of serverGroups) {
-      namespace += '    ' + serverName + ': {\n';
+      // Quote server names if they contain hyphens or special characters
+      const serverKey = this.needsQuoting(serverName) ? `"${serverName}"` : serverName;
+      namespace += '    ' + serverKey + ': {\n';
 
       for (const tool of tools) {
         const interfaceName = this.getInterfaceName(tool.server, tool.tool);
@@ -162,8 +164,11 @@ export class DeclarationGenerator {
           namespace += '       */\n';
         }
 
+        // Quote tool names if they contain hyphens or special characters
+        const toolKey = this.needsQuoting(tool.tool) ? `"${tool.tool}"` : tool.tool;
+
         // Add function signature
-        namespace += '      ' + tool.tool + '(args: ' + interfaceName + '): Promise<MCPToolResult>;\n';
+        namespace += '      ' + toolKey + '(args: ' + interfaceName + '): Promise<MCPToolResult>;\n';
       }
 
       namespace += '    };\n';
@@ -211,6 +216,16 @@ export class DeclarationGenerator {
       .split(/[-_]/)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join('');
+  }
+
+  /**
+   * Check if identifier needs quoting in TypeScript
+   *
+   * Identifiers with hyphens, spaces, or starting with numbers need quotes
+   */
+  private needsQuoting(identifier: string): boolean {
+    // Check if contains hyphens, spaces, or starts with number
+    return /[-\s]/.test(identifier) || /^\d/.test(identifier);
   }
 
   /**

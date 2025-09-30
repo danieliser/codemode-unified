@@ -1,6 +1,6 @@
 /**
  * Auto-generated TypeScript declarations for MCP tools
- * Generated: 2025-09-30T10:23:12.021Z
+ * Generated: 2025-09-30T10:35:32.390Z
  *
  * This file provides type-safe access to all MCP server tools
  * available in the codemode-unified execution environment.
@@ -532,7 +532,7 @@ declare global {
        */
       check_database_health(args: AutomemCheckDatabaseHealthArgs): Promise<MCPToolResult>;
     };
-    sequential-thinking: {
+    "sequential-thinking": {
       /**
        * A detailed tool for dynamic and reflective problem-solving through thoughts.
 This tool helps analyze problems through a flexible thinking process that can adapt and evolve.
@@ -613,13 +613,13 @@ Response Format:
 
 For ambiguous queries, request clarification before proceeding with a best-guess match.
        */
-      resolve-library-id(args: Context7ResolveLibraryIdArgs): Promise<MCPToolResult>;
+      "resolve-library-id"(args: Context7ResolveLibraryIdArgs): Promise<MCPToolResult>;
       /**
        * Fetches up-to-date documentation for a library. You must call 'resolve-library-id' first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.
        */
-      get-library-docs(args: Context7GetLibraryDocsArgs): Promise<MCPToolResult>;
+      "get-library-docs"(args: Context7GetLibraryDocsArgs): Promise<MCPToolResult>;
     };
-    claude-code: {
+    "claude-code": {
       /**
        * Launch a new agent to handle complex, multi-step tasks autonomously. 
 
