@@ -150,10 +150,10 @@ console.log('__RESULT__', JSON.stringify({
 
 ### Benchmarks (Typical)
 - **Cold start**: 100-200ms (first execution after initialization)
-- **Warm execution**: 150-300ms (subsequent executions)
+- **Simple operations: 19-21ms
 - **Initialization**: 15ms (verifying Deno availability)
 - **Memory usage**: ~50MB per sandbox
-- **Throughput**: 500+ req/sec (network-bound with fetch)
+- **Throughput: 500+ req/sec (network-bound)
 
 ### Comparison to Other Runtimes
 
