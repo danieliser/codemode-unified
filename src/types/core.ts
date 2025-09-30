@@ -13,6 +13,12 @@ export interface ExecutionOptions {
   typescript?: boolean;               // Default: true
   capabilities?: CapabilitySet;       // Default: none
   context?: Record<string, unknown>;  // Default: {}
+  permissions?: {                      // Deno-specific permissions
+    allowRead?: boolean;
+    allowWrite?: boolean;
+    allowEnv?: boolean;
+    allowNet?: boolean;
+  };
 }
 
 export interface ExecutionRequest {
