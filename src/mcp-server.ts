@@ -31,6 +31,9 @@ import { fileURLToPath } from 'url';
 const SERVER_NAME = 'codemode-unified';
 const SERVER_VERSION = '0.1.0';
 
+// Configuration from environment
+const TYPE_EXPOSURE_MODE = process.env.CODEMODE_TYPE_EXPOSURE || 'on-demand'; // 'on-demand' | 'auto-include'
+
 // Runtime cache to avoid re-initialization
 const runtimeCache = new Map<RuntimeType, BaseRuntime>();
 
@@ -188,6 +191,64 @@ function loadTypeScriptDeclarations(): string {
 }
 
 /**
+ * Generate a concise summary of available MCP tools for tool description
+ */
+function generateMCPToolSummary(): string {
+  if (!mcpManager) {
+    return '';
+  }
+
+  const tools = mcpManager.getAvailableTools();
+  if (tools.length === 0) {
+    return '';
+  }
+
+  // Group by namespace
+  const byNamespace = new Map<string, typeof tools>();
+  for (const tool of tools) {
+    const [namespace] = tool.namespace.split('.', 1);
+    if (!byNamespace.has(namespace)) {
+      byNamespace.set(namespace, []);
+    }
+    byNamespace.get(namespace)!.push(tool);
+  }
+
+  let summary = '\n\nAvailable MCP Tools:\n';
+
+  for (const [namespace, nsTools] of byNamespace.entries()) {
+    const safeNamespace = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(namespace)
+      ? `mcp.${namespace}`
+      : `mcp["${namespace}"]`;
+
+    summary += `\n${safeNamespace}:\n`;
+
+    for (const tool of nsTools) {
+      const toolName = tool.name.replace(`${namespace}_`, '').replace(`${namespace}-`, '');
+      const safeToolName = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(toolName)
+        ? toolName
+        : `"${toolName}"`;
+
+      // Get parameter names from schema
+      const params = tool.inputSchema?.properties
+        ? Object.keys(tool.inputSchema.properties).slice(0, 3).join(', ')
+        : 'args';
+
+      summary += `  - ${safeToolName}(${params}${tool.inputSchema?.properties && Object.keys(tool.inputSchema.properties).length > 3 ? ', ...' : ''})`;
+
+      if (tool.description) {
+        // Truncate description to first sentence
+        const shortDesc = tool.description.split('.')[0] + '.';
+        summary += ` // ${shortDesc.substring(0, 80)}${shortDesc.length > 80 ? '...' : ''}`;
+      }
+
+      summary += '\n';
+    }
+  }
+
+  return summary;
+}
+
+/**
  * Generate MCP proxy code to inject into sandbox
  */
 function generateMCPProxy(includeTypes: boolean = false): string {
@@ -297,12 +358,32 @@ async function getRuntime(type: RuntimeType): Promise<BaseRuntime> {
   return runtimeCache.get(type)!;
 }
 
-// Tool definitions
-const tools: Tool[] = [
-  {
-    name: 'execute_code',
-    description: 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities. When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()). For TypeScript type definitions and API documentation of available MCP tools, read the resource mcp://types/declarations before writing code.',
-    inputSchema: {
+/**
+ * Generate tool definitions dynamically based on configuration
+ */
+function generateToolDefinitions(): Tool[] {
+  // Base description for execute_code
+  let executeCodeDescription = 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities.';
+
+  // Add MCP tool information based on mode
+  if (mcpManager && TYPE_EXPOSURE_MODE === 'auto-include') {
+    // Auto-include mode: Add tool summary directly in description
+    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object.';
+    const toolSummary = generateMCPToolSummary();
+    if (toolSummary) {
+      executeCodeDescription += toolSummary;
+    }
+    executeCodeDescription += '\n\nFor complete TypeScript type definitions, read the resource mcp://types/declarations.';
+  } else if (mcpManager) {
+    // On-demand mode: Just mention the resource
+    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()). For TypeScript type definitions and API documentation of available MCP tools, read the resource mcp://types/declarations before writing code.';
+  }
+
+  return [
+    {
+      name: 'execute_code',
+      description: executeCodeDescription,
+      inputSchema: {
       type: 'object',
       properties: {
         code: {
@@ -362,7 +443,8 @@ const tools: Tool[] = [
       required: ['runtime']
     }
   }
-];
+  ];
+}
 
 // Create MCP server
 const server = new Server(
@@ -634,6 +716,7 @@ return await batchMCPOperations();
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async (_request) => {
+  const tools = generateToolDefinitions();
   return { tools };
 });
 
@@ -1042,8 +1125,9 @@ async function main() {
   console.error('');
 
   console.error('Available tools:');
+  const tools = generateToolDefinitions();
   tools.forEach(tool => {
-    console.error(`   - ${tool.name}: ${tool.description}`);
+    console.error(`   - ${tool.name}: ${tool.description.substring(0, 100)}${tool.description.length > 100 ? '...' : ''}`);
   });
   console.error('');
   console.error('✅ Server ready and listening on stdio');
