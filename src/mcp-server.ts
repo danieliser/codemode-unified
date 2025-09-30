@@ -11,6 +11,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
   type Tool
 } from '@modelcontextprotocol/sdk/types.js';
 import { RuntimeFactory, RuntimeType } from './runtime/base-runtime.js';
@@ -297,7 +301,7 @@ async function getRuntime(type: RuntimeType): Promise<BaseRuntime> {
 const tools: Tool[] = [
   {
     name: 'execute_code',
-    description: 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities.',
+    description: 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities. When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()). For TypeScript type definitions and API documentation of available MCP tools, read the resource mcp://types/declarations before writing code.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -366,10 +370,267 @@ const server = new Server(
     name: SERVER_NAME,
     version: SERVER_VERSION,
     capabilities: {
-      tools: {}
+      tools: {},
+      resources: {},
+      prompts: {}
     }
   }
 );
+
+// List available resources
+server.setRequestHandler(ListResourcesRequestSchema, async (_request) => {
+  // Only expose type declarations if MCP integration is enabled
+  if (!mcpManager) {
+    return { resources: [] };
+  }
+
+  return {
+    resources: [
+      {
+        uri: 'mcp://types/declarations',
+        name: 'MCP Tool Type Declarations',
+        description: 'TypeScript declarations for all available MCP tools. Use these types when writing code that calls MCP tools via the mcp.* proxy.',
+        mimeType: 'text/x-typescript'
+      }
+    ]
+  };
+});
+
+// Read resource content
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const { uri } = request.params;
+
+  if (uri === 'mcp://types/declarations') {
+    const declarations = loadTypeScriptDeclarations();
+
+    if (!declarations) {
+      throw new Error('Type declarations not available. Ensure MCP integration is enabled and declarations have been generated.');
+    }
+
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: 'text/x-typescript',
+          text: declarations
+        }
+      ]
+    };
+  }
+
+  throw new Error(`Unknown resource: ${uri}`);
+});
+
+// List available prompts
+server.setRequestHandler(ListPromptsRequestSchema, async (_request) => {
+  const prompts = [
+    {
+      name: 'mcp-tool-example',
+      description: 'Example code template for calling MCP tools with proper error handling',
+      arguments: [
+        {
+          name: 'tool_name',
+          description: 'The MCP tool to call (e.g., automem.store_memory)',
+          required: true
+        }
+      ]
+    },
+    {
+      name: 'async-handler',
+      description: 'Template for async code with proper error handling and logging',
+      arguments: []
+    },
+    {
+      name: 'mcp-batch-operations',
+      description: 'Template for batching multiple MCP tool calls efficiently',
+      arguments: []
+    }
+  ];
+
+  return { prompts };
+});
+
+// Get prompt content
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  switch (name) {
+    case 'mcp-tool-example': {
+      const toolName = args?.tool_name || 'automem.store_memory';
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Create example code for calling mcp.${toolName}(). Include proper error handling, type-safe arguments, and result processing.`
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `Here's a type-safe example for mcp.${toolName}():
+
+\`\`\`typescript
+try {
+  // Read types first for reference
+  // Resource: mcp://types/declarations
+
+  const result = await mcp.${toolName}({
+    // Add type-safe arguments here based on the TypeScript definitions
+    // Check mcp.d.ts for exact parameter types
+  });
+
+  console.log('Success:', result);
+  return result;
+} catch (error) {
+  console.error('MCP tool call failed:', error);
+  throw error;
+}
+\`\`\`
+
+Remember to:
+1. Read mcp://types/declarations resource for exact types
+2. Use proper TypeScript types for all arguments
+3. Handle errors appropriately
+4. Use the correct namespace (quote if hyphenated: mcp["server-name"])
+`
+            }
+          }
+        ]
+      };
+    }
+
+    case 'async-handler': {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: 'Create an async function template with error handling'
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `\`\`\`typescript
+async function handleOperation() {
+  const startTime = Date.now();
+
+  try {
+    console.log('Starting operation...');
+
+    // Your async operations here
+    const result = await someAsyncCall();
+
+    const duration = Date.now() - startTime;
+    console.log(\`Operation completed in \${duration}ms\`);
+
+    return {
+      success: true,
+      result,
+      duration
+    };
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(\`Operation failed after \${duration}ms:\`, error);
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration
+    };
+  }
+}
+
+// Execute and return
+return await handleOperation();
+\`\`\`
+`
+            }
+          }
+        ]
+      };
+    }
+
+    case 'mcp-batch-operations': {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: 'Create a template for batching multiple MCP tool calls'
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `\`\`\`typescript
+async function batchMCPOperations() {
+  console.log('Starting batch operations...');
+
+  try {
+    // Execute MCP calls in parallel for better performance
+    const results = await Promise.allSettled([
+      mcp.automem.store_memory({
+        content: 'First memory',
+        tags: ['batch'],
+        importance: 0.8
+      }),
+      mcp.automem.store_memory({
+        content: 'Second memory',
+        tags: ['batch'],
+        importance: 0.7
+      }),
+      mcp["sequential-thinking"].sequentialthinking({
+        thought: 'Analyzing batch results',
+        nextThoughtNeeded: false,
+        thoughtNumber: 1,
+        totalThoughts: 1
+      })
+    ]);
+
+    // Process results
+    const successful = results.filter(r => r.status === 'fulfilled');
+    const failed = results.filter(r => r.status === 'rejected');
+
+    console.log(\`Batch complete: \${successful.length} succeeded, \${failed.length} failed\`);
+
+    return {
+      total: results.length,
+      successful: successful.length,
+      failed: failed.length,
+      results: results.map((r, i) => ({
+        index: i,
+        status: r.status,
+        value: r.status === 'fulfilled' ? r.value : undefined,
+        error: r.status === 'rejected' ? r.reason : undefined
+      }))
+    };
+  } catch (error) {
+    console.error('Batch operation failed:', error);
+    throw error;
+  }
+}
+
+return await batchMCPOperations();
+\`\`\`
+`
+            }
+          }
+        ]
+      };
+    }
+
+    default:
+      throw new Error(`Unknown prompt: ${name}`);
+  }
+});
 
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async (_request) => {

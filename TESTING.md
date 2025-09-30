@@ -4,10 +4,28 @@ This document explains how to test the TypeScript type injection feature for MCP
 
 ## What Was Implemented
 
-The system now:
-1. **Generates TypeScript declarations** from MCP tool schemas on startup (`generated/mcp.d.ts`)
-2. **Injects type declarations** into TypeScript-aware runtimes (Bun, Deno) during code execution
-3. **Provides full type safety** and IDE completion for MCP tool calls
+The system now provides **complete MCP integration** following the MCP specification:
+
+### 1. Tools ✅
+- `execute_code` - Execute JavaScript/TypeScript with MCP tool access
+- `list_runtimes` - Show available runtimes and capabilities
+- `get_runtime_capabilities` - Get detailed runtime information
+- `runtime_health_check` - Verify runtime operational status
+
+### 2. Resources ✅
+- **mcp://types/declarations** - TypeScript declarations for all MCP tools
+  - Read this resource BEFORE writing code to get type information
+  - Contains full TypeScript interfaces, function signatures, and TSDoc comments
+
+### 3. Prompts ✅
+- **mcp-tool-example** - Template for calling MCP tools with error handling
+- **async-handler** - Async function template with logging
+- **mcp-batch-operations** - Template for parallel MCP operations
+
+### 4. Runtime Type Injection ✅
+- Auto-generates TypeScript declarations from MCP schemas on startup
+- Injects types into TypeScript-aware runtimes (Bun, Deno) during execution
+- Provides full IDE-like type safety and code completion
 
 ## How It Works
 
