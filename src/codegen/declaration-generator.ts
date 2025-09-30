@@ -160,7 +160,9 @@ export class DeclarationGenerator {
         // Add JSDoc comment with description
         if (tool.description) {
           namespace += '      /**\n';
-          namespace += '       * ' + tool.description + '\n';
+          // Format description for TSDoc (escape special chars, limit length)
+          const cleanDescription = this.formatTSDocDescription(tool.description);
+          namespace += '       * ' + cleanDescription + '\n';
           namespace += '       */\n';
         }
 
@@ -226,6 +228,30 @@ export class DeclarationGenerator {
   private needsQuoting(identifier: string): boolean {
     // Check if contains hyphens, spaces, or starts with number
     return /[-\s]/.test(identifier) || /^\d/.test(identifier);
+  }
+
+  /**
+   * Format description for TSDoc comments
+   *
+   * Cleans up markdown formatting and ensures proper TSDoc structure
+   */
+  private formatTSDocDescription(description: string): string {
+    // Limit to first sentence or 200 chars to keep hover hints readable
+    let cleaned = description.split('\n')[0]; // Take first line only
+
+    // If first line is too long, take first sentence or truncate
+    if (cleaned.length > 200) {
+      const firstSentence = cleaned.match(/^[^.!?]+[.!?]/);
+      cleaned = firstSentence ? firstSentence[0] : cleaned.substring(0, 197) + '...';
+    }
+
+    // Remove markdown formatting characters
+    cleaned = cleaned
+      .replace(/[#*`]/g, '') // Remove markdown markers
+      .replace(/\s+/g, ' ')  // Normalize whitespace
+      .trim();
+
+    return cleaned;
   }
 
   /**
