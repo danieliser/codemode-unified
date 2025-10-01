@@ -108,7 +108,7 @@ export const MCPConfigSchema = z.object({
     command: z.string().optional(),
     args: z.array(z.string()).optional(),
     url: z.string().optional(),
-    environment: z.record(z.string()).optional(),
+    env: z.record(z.string()).optional(),
     auth: z.object({
       type: z.enum(['bearer', 'basic', 'oauth2', 'api-key']),
       token: z.string().optional(),

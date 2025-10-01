@@ -141,7 +141,7 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
         transport: config.transport || config.type || 'stdio', // Try transport first, then type, then default to stdio
         command: config.command,
         args: config.args || [],
-        environment: config.env || {},
+        env: config.env || {},
         timeout: 30000,
         retryPolicy: {
           maxAttempts: 3,
@@ -151,7 +151,7 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
         }
       };
 
-      console.log(`🔍 [CONVERTER] Converted environment keys:`, Object.keys(servers[name].environment));
+      console.log(`🔍 [CONVERTER] Converted env keys:`, Object.keys(servers[name].env));
     }
   }
 
