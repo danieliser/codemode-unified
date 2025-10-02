@@ -41,9 +41,15 @@
 
 ### Test Coverage
 - ⚠️ **Sandbox tests**: Skipped due to initialization issues in coverage runs
-- ⚠️ **Integration tests**: 8/13 failing (need executor integration fixes)
+- ⚠️ **Integration tests**: 7/13 failing - **ROOT CAUSE IDENTIFIED**:
+  - SandboxManager hardcodes QuickJS runtime (src/sandbox/index.ts:10,15)
+  - Config schema missing 'bun' in runtime enum (src/config/schema.ts:75)
+  - Tests require async/await (QuickJS has limited support, need Bun)
+  - **6 tests passing**: All sync/error handling tests work
+  - **7 tests failing**: All async tests (need code fix to enable Bun runtime)
 - ⚠️ **Coverage reports**: Tests pass but vitest v8 coverage hangs (known issue #5252)
 
+**Test Status**: Integration tests fixed, awaiting 3 code changes to pass fully
 **Workaround**: Run tests with `npm test -- --run` (no coverage flag)
 
 ## ❌ Missing / Not Started
