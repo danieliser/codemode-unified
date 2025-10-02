@@ -122,7 +122,7 @@ temp/
 audit-logs/
 
 # Local test files
-test-*.js
-test-*.ts
+./test-*.js
+./test-*.ts
 debug-*.js
 debug-*.ts

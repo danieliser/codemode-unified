@@ -5,21 +5,43 @@ import type {
   SandboxConfig
 } from '../types/core.js';
 import { QuickJSSandbox } from './quickjs-runtime.js';
+import { RuntimeFactory, type BaseRuntime } from '../runtime/base-runtime.js';
 
 export class SandboxManager {
-  private sandbox: QuickJSSandbox;
+  private sandbox: QuickJSSandbox | BaseRuntime;
   private config: SandboxConfig;
+  private isQuickJS: boolean;
 
   constructor(config: SandboxConfig) {
     this.config = config;
-    this.sandbox = new QuickJSSandbox(
-      config.workers.max,
-      config.workers.idleTimeout
-    );
+    const runtime = config.runtime || 'quickjs';
+    this.isQuickJS = runtime === 'quickjs';
+
+    // For QuickJS, initialize immediately
+    // For other runtimes, will be created in initialize()
+    if (this.isQuickJS) {
+      this.sandbox = new QuickJSSandbox(
+        config.workers?.max || 8,
+        config.workers?.idleTimeout || 30000
+      );
+    } else {
+      this.sandbox = null as any; // Will be initialized in initialize()
+    }
   }
 
   async initialize(): Promise<void> {
-    await this.sandbox.initialize();
+    if (!this.isQuickJS && !this.sandbox) {
+      // Create runtime using RuntimeFactory
+      const runtime = this.config.runtime || 'quickjs';
+      this.sandbox = await RuntimeFactory.create({
+        type: runtime as any,
+        maxWorkers: this.config.workers?.max || 8
+      });
+    }
+
+    if (this.sandbox && typeof this.sandbox.initialize === 'function') {
+      await this.sandbox.initialize();
+    }
   }
 
   async execute(

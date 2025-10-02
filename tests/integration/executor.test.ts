@@ -73,7 +73,7 @@ describe('Code Mode Executor Integration', () => {
     expect(result.success).toBe(true);
     expect(result.result).toBe(4);
     expect(result.requestId).toBeDefined();
-    expect(result.metrics.executionTime).toBeGreaterThan(0);
+    expect(result.metrics.executionTime).toBeGreaterThanOrEqual(0); // Bun is super fast, might be 0ms
   });
 
   it('should execute code with native tools', async () => {
@@ -247,7 +247,7 @@ describe('Code Mode Executor Integration', () => {
     expect(capabilities.tools.native).toBeInstanceOf(Array);
     expect(capabilities.tools.mcp).toBeInstanceOf(Array);
     expect(capabilities.sandbox).toBeDefined();
-    expect(capabilities.sandbox.runtime).toBe('quickjs');
+    expect(capabilities.sandbox.runtime).toBe('bun');
   });
 
   it('should get system health', () => {

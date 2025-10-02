@@ -311,7 +311,7 @@ export interface SSLConfig {
 }
 
 export interface SandboxConfig {
-  runtime?: 'quickjs' | 'deno' | 'isolated-vm';
+  runtime?: 'quickjs' | 'bun' | 'deno' | 'isolated-vm' | 'e2b';
   workers?: WorkerConfig;
   limits?: ResourceLimits;
   security?: SandboxSecurity;

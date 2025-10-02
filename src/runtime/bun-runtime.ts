@@ -201,6 +201,59 @@ export class BunRuntime extends BaseRuntime {
     // Trim the code
     const trimmedCode = code.trim();
 
+    // Check if code is already wrapped by the executor
+    const isExecutorWrapped = trimmedCode.includes('// Code Mode Unified - Sandbox Runtime') ||
+                             trimmedCode.includes('globalThis._executionState') ||
+                             trimmedCode.includes('globalThis._logs');
+
+    if (isExecutorWrapped) {
+      // Code is already wrapped by executor
+      // The executor evaluates expressions as last statement (e.g., "_result;") inside try-catch
+      // We need to find that expression and convert it to a return statement
+
+      // Look for pattern: "_result;" or similar identifier followed by semicolon
+      // This appears before the closing brace of the try block
+      let matchFound = false;
+      const modifiedCode = trimmedCode.replace(
+        /(\s+)(_result);/g,
+        (match, whitespace, varName) => {
+          matchFound = true;
+          return `${whitespace}return ${varName};`;
+        }
+      );
+
+      const finalWrappedCode = `
+let __result;
+let __logs = [];
+
+// Save original console before executor overrides it
+const __originalConsole = {
+  log: console.log,
+  error: console.error
+};
+
+try {
+  __result = await (async function() {
+    ${modifiedCode}
+  })();
+  __logs = globalThis._logs || [];
+} catch (error) {
+  __originalConsole.error('EXECUTION_ERROR:', error.message);
+  __originalConsole.error(error.stack);
+  process.exit(1);
+}
+
+// Use original console to output result (executor's console captures logs)
+__originalConsole.log('__RESULT__', JSON.stringify({
+  result: __result,
+  logs: __logs
+}));
+`;
+
+      return finalWrappedCode;
+    }
+
+    // Not executor-wrapped - apply our own wrapping
     // Check if code is a simple expression (doesn't contain statements)
     const isExpression = !trimmedCode.includes(';') &&
                         !trimmedCode.startsWith('var ') &&
@@ -292,6 +345,14 @@ console.log('__RESULT__', JSON.stringify({
       const proc = spawn(this.bunPath, args);
       let stdout = '';
       let stderr = '';
+      let resolved = false;
+
+      const cleanup = () => {
+        resolved = true;
+        proc.removeAllListeners();
+        proc.stdout?.removeAllListeners();
+        proc.stderr?.removeAllListeners();
+      };
 
       proc.stdout.on('data', (data) => {
         stdout += data.toString();
@@ -302,6 +363,9 @@ console.log('__RESULT__', JSON.stringify({
       });
 
       proc.on('close', (code) => {
+        if (resolved) return;
+        cleanup();
+
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
@@ -309,11 +373,23 @@ console.log('__RESULT__', JSON.stringify({
         }
       });
 
-      proc.on('error', reject);
+      proc.on('error', (error) => {
+        if (resolved) return;
+        cleanup();
+        reject(error);
+      });
 
       if (options?.timeout) {
         setTimeout(() => {
-          proc.kill();
+          if (resolved) return;
+          cleanup();
+          proc.kill('SIGTERM');
+          // Give it a moment to terminate gracefully
+          setTimeout(() => {
+            if (!proc.killed) {
+              proc.kill('SIGKILL');
+            }
+          }, 100);
           reject(new Error('Bun execution timeout'));
         }, options.timeout);
       }
