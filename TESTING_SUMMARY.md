@@ -172,9 +172,11 @@ Located in `src/runtime/__tests__/`:
 | Executor | 32 | 24 | 8 | ~75% |
 | MCP Aggregator | 31 | 23 | 8 | ~74% |
 | Security Manager | 41 | 39 | 2 | ~95% |
+| Auth Manager | 33 | 32 | 1 | ~97% |
+| Tools Coordinator | 19 | 18 | 1 | ~95% |
 | Sandbox | 9 | 9 | 0 | 100% |
-| Tools | ~5 | ~5 | 0 | ~30% |
-| **Total Unit** | **~118** | **~100** | **~18** | **~75%** |
+| Tools (legacy) | ~5 | ~5 | 0 | ~30% |
+| **Total Unit** | **~170** | **~150** | **~20** | **~85%** |
 
 ---
 
