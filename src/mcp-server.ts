@@ -41,35 +41,184 @@ const runtimeCache = new Map<RuntimeType, BaseRuntime>();
 let mcpManager: MCPManager | null = null;
 
 /**
- * Parse structured text responses into JSON objects
- * Attempts to extract key-value pairs from formatted text
- * Returns object with both parsed fields AND original text for flexibility
+ * Response helper methods exposed to agents for custom parsing
  */
-function parseStructuredText(text: string): any {
-  // If it's already a simple value, return as-is
-  if (!text.includes('\n') && !text.includes(':')) {
-    return text;
+interface MCPResponseHelpers {
+  parseAsStructured(): any;
+  parseAsArray(): any[];
+  parseAsKeyValue(): Record<string, any>;
+  getRawText(): string;
+}
+
+/**
+ * Enhanced MCP tool response with raw content + convenience fields + helpers
+ */
+interface EnhancedMCPResponse {
+  content: any[];           // Raw MCP content array (spec-compliant)
+  text: string;             // Combined text from all text content
+  parsed: any | null;       // Auto-parsed structure (or null if unparseable)
+  helpers: MCPResponseHelpers;  // Utility methods for custom parsing
+  isError?: boolean;
+}
+
+/**
+ * Create helper methods bound to a specific text response
+ */
+function createResponseHelpers(text: string): MCPResponseHelpers {
+  return {
+    parseAsStructured(): any {
+      // Extract key-value pairs from formatted text
+      const result: any = {};
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const match = line.match(/^([A-Z][A-Za-z\s]+?):\s*(.+)$/);
+        if (match) {
+          const [, key, value] = match;
+          const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
+          result[normalizedKey] = value;
+        }
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
+    },
+
+    parseAsArray(): any[] {
+      // Extract numbered list items with multi-line metadata
+      // Format: "1. Content...\n   Key: Value\n   Key2: Value2"
+      const lines = text.split('\n');
+      const items: any[] = [];
+      let currentItem: any = null;
+
+      for (const line of lines) {
+        // Check for numbered list item start
+        const match = line.match(/^(\d+)\.\s+(.+)$/);
+        if (match) {
+          // Save previous item if exists
+          if (currentItem) {
+            items.push(currentItem);
+          }
+
+          // Start new item
+          const [, index, content] = match;
+          currentItem = {
+            index: parseInt(index),
+            content: content.trim()
+          };
+        } else if (currentItem && line.trim()) {
+          // Check for metadata fields (indented key-value pairs)
+          const metaMatch = line.match(/^\s+([A-Za-z\s]+):\s*(.+)$/);
+          if (metaMatch) {
+            const [, key, value] = metaMatch;
+            const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
+            currentItem[normalizedKey] = value.trim();
+          }
+        }
+      }
+
+      // Add last item
+      if (currentItem) {
+        items.push(currentItem);
+      }
+
+      return items.length > 0 ? items : [];
+    },
+
+    parseAsKeyValue(): Record<string, any> {
+      // Simple key:value extraction
+      const result: Record<string, any> = {};
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          const key = line.substring(0, colonIndex).trim();
+          const value = line.substring(colonIndex + 1).trim();
+          result[key] = value;
+        }
+      }
+
+      return result;
+    },
+
+    getRawText(): string {
+      return text;
+    }
+  };
+}
+
+/**
+ * Auto-parse text content intelligently
+ * Returns parsed structure if detected, null otherwise
+ */
+function autoParseContent(text: string): any | null {
+  // 1. Try JSON parsing first
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Not JSON, continue
   }
 
-  // Try to extract key-value pairs from text
-  const result: any = { _text: text };
+  // 2. Check for key-value structure
+  const kvResult: any = {};
   const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+  let foundStructure = false;
 
-  // Extract single-line key-value pairs (e.g., "Memory ID: xyz")
-  let foundStructured = false;
   for (const line of lines) {
     const match = line.match(/^([A-Z][A-Za-z\s]+?):\s*(.+)$/);
     if (match) {
       const [, key, value] = match;
       const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
-      result[normalizedKey] = value;
-      foundStructured = true;
+      kvResult[normalizedKey] = value;
+      foundStructure = true;
     }
   }
 
-  // If we found structured data, return object with both parsed fields and original text
-  // Otherwise just return the original text string
-  return foundStructured ? result : text;
+  if (foundStructure) {
+    return kvResult;
+  }
+
+  // 3. Check for array structure (numbered lists with possible metadata)
+  const arrayMatch = text.match(/^\d+\.\s+/m);
+  if (arrayMatch) {
+    const textLines = text.split('\n');
+    const items: any[] = [];
+    let currentItem: any = null;
+
+    for (const line of textLines) {
+      const itemMatch = line.match(/^(\d+)\.\s+(.+)$/);
+      if (itemMatch) {
+        // Save previous item
+        if (currentItem) {
+          items.push(currentItem);
+        }
+        // Start new item
+        currentItem = {
+          index: parseInt(itemMatch[1]),
+          content: itemMatch[2].trim()
+        };
+      } else if (currentItem && line.trim()) {
+        // Check for indented metadata
+        const metaMatch = line.match(/^\s+([A-Za-z\s]+):\s*(.+)$/);
+        if (metaMatch) {
+          const normalizedKey = metaMatch[1].toLowerCase().replace(/\s+/g, '_');
+          currentItem[normalizedKey] = metaMatch[2].trim();
+        }
+      }
+    }
+
+    // Add last item
+    if (currentItem) {
+      items.push(currentItem);
+    }
+
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  // No structure detected
+  return null;
 }
 
 /**
@@ -823,39 +972,149 @@ ${enhancedCode.substring(0, 800)}
                   const result = await mcpManager.callTool(call.namespace, call.args);
 
                   // MCP responses have format: { content: [{type, text}], isError?: boolean }
-                  // Extract the actual result from the response
-                  let actualValue = result;
+                  // Build enhanced response with raw content + convenience fields + helpers
+                  let enhancedResponse: EnhancedMCPResponse;
+
                   if (result && result.content && Array.isArray(result.content)) {
-                    const textContent = result.content.find((c: any) => c.type === 'text')?.text;
-                    if (textContent) {
-                      try {
-                        // Try parsing as JSON first
-                        actualValue = JSON.parse(textContent);
-                      } catch {
-                        // Not JSON - try parsing structured text (works for any MCP server)
-                        actualValue = parseStructuredText(textContent);
-                      }
-                    }
+                    // Extract combined text from all text content
+                    const textParts = result.content
+                      .filter((c: any) => c.type === 'text')
+                      .map((c: any) => c.text);
+                    const combinedText = textParts.join('\n');
+
+                    // Create enhanced response
+                    enhancedResponse = {
+                      content: result.content,          // Raw MCP content array
+                      text: combinedText,               // Combined text
+                      parsed: autoParseContent(combinedText),  // Auto-parsed structure
+                      helpers: createResponseHelpers(combinedText),  // Helper methods
+                      isError: result.isError
+                    };
+                  } else {
+                    // Fallback for non-standard responses
+                    enhancedResponse = {
+                      content: [],
+                      text: String(result),
+                      parsed: result,
+                      helpers: createResponseHelpers(String(result)),
+                      isError: false
+                    };
                   }
 
                   return {
                     placeholder: call.placeholder,
-                    value: actualValue
+                    value: enhancedResponse
                   };
                 } catch (error) {
                   return {
                     placeholder: call.placeholder,
-                    value: { error: error instanceof Error ? error.message : String(error) }
+                    value: {
+                      content: [],
+                      text: error instanceof Error ? error.message : String(error),
+                      parsed: null,
+                      helpers: createResponseHelpers(error instanceof Error ? error.message : String(error)),
+                      isError: true
+                    }
                   };
                 }
               })
             );
 
-            // Create resolution code
+            // Create resolution code with helper function definitions
             let resolutionCode = '// MCP Call Resolutions\n';
+
+            // Inject helper function definitions into execution environment
+            resolutionCode += `
+// Helper functions for MCP response parsing
+function __createMCPHelpers(text) {
+  return {
+    parseAsStructured: function() {
+      const result = {};
+      const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const match = line.match(/^([A-Z][A-Za-z\\s]+?):\\s*(.+)$/);
+        if (match) {
+          const key = match[1].toLowerCase().replace(/\\s+/g, '_');
+          result[key] = match[2];
+        }
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
+    },
+
+    parseAsArray: function() {
+      const lines = text.split('\\n');
+      const items = [];
+      let currentItem = null;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Check for numbered list item start (e.g., "1. Content here...")
+        const match = line.match(/^(\\d+)\\.\\s+(.+)$/);
+        if (match) {
+          // Save previous item if exists
+          if (currentItem) {
+            items.push(currentItem);
+          }
+
+          // Start new item
+          const [, index, content] = match;
+          currentItem = {
+            index: parseInt(index),
+            content: content.trim()
+          };
+        } else if (currentItem && line.trim()) {
+          // Check for metadata fields (e.g., "   ID: xyz", "   Created: ...")
+          const metaMatch = line.match(/^\\s+([A-Za-z\\s]+):\\s*(.+)$/);
+          if (metaMatch) {
+            const [, key, value] = metaMatch;
+            const normalizedKey = key.toLowerCase().replace(/\\s+/g, '_');
+            currentItem[normalizedKey] = value.trim();
+          }
+        }
+      }
+
+      // Add last item
+      if (currentItem) {
+        items.push(currentItem);
+      }
+
+      return items.length > 0 ? items : [];
+    },
+
+    parseAsKeyValue: function() {
+      const result = {};
+      const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          const key = line.substring(0, colonIndex).trim();
+          const value = line.substring(colonIndex + 1).trim();
+          result[key] = value;
+        }
+      }
+
+      return result;
+    },
+
+    getRawText: function() {
+      return text;
+    }
+  };
+}
+`;
+
+            // Store MCP results with serializable data + recreatable helpers
             resolutionCode += 'const __mcpResults = {};\n';
             for (const res of resolutions) {
-              resolutionCode += `__mcpResults['${res.placeholder}'] = ${JSON.stringify(res.value)};\n`;
+              // Serialize without the helpers (functions can't be JSON.stringified)
+              const { helpers, ...serializableValue } = res.value as any;
+              resolutionCode += `__mcpResults['${res.placeholder}'] = ${JSON.stringify(serializableValue)};\n`;
+              // Add helpers back using the injected function
+              resolutionCode += `__mcpResults['${res.placeholder}'].helpers = __createMCPHelpers(__mcpResults['${res.placeholder}'].text);\n`;
             }
 
             // Update __mcpCall to return actual results
