@@ -10,15 +10,26 @@ export default defineConfig({
     setupFiles: [],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html'],
+      reporter: ['text', 'json', 'html', 'text-summary'],
+      include: [
+        'src/**/*.ts'
+      ],
       exclude: [
         'node_modules/',
         'dist/',
         'tests/',
         '**/*.d.ts',
         '**/*.test.ts',
-        '**/*.config.ts'
-      ]
+        '**/*.config.ts',
+        'src/runtime/__tests__/**',
+        'src/sandbox/test-*.ts',
+        'src/codegen/examples/**'
+      ],
+      all: true,
+      lines: 75,
+      functions: 75,
+      branches: 70,
+      statements: 75
     }
   },
   esbuild: {
