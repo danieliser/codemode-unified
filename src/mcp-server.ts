@@ -435,8 +435,9 @@ function generateMCPProxy(includeTypes: boolean = false): string {
     byNamespace.get(namespace)!.push(tool);
   }
 
-  // Generate proxy object
-  proxyCode += 'const mcp = {\n';
+  // Generate proxy object (delete first to allow redefinition in reused workers)
+  proxyCode += 'delete globalThis.mcp;\n';
+  proxyCode += 'globalThis.mcp = {\n';
 
   for (const [namespace, nsTools] of byNamespace.entries()) {
     // Quote namespace if it contains special characters (like hyphens)
@@ -904,9 +905,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // MCP call handler - needed for both async and non-async runtimes
           const mcpHandler = `
 // MCP Tool Call Handler
-const __mcpCallCounter = { count: 0 };
+globalThis.__mcpCallCounter = globalThis.__mcpCallCounter || { count: 0 };
 async function __mcpCall(namespace, args) {
-  const id = __mcpCallCounter.count++;
+  const id = globalThis.__mcpCallCounter.count++;
   const placeholder = \`<<MCP_CALL_\${namespace}_\${id}>>\`;
   console.log('__MCP_CALL__', JSON.stringify({ placeholder, namespace, args }));
   return placeholder;
@@ -1119,9 +1120,9 @@ function __createMCPHelpers(text) {
 
             // Update __mcpCall to return actual results
             const mcpHandlerV2 = `
-const __mcpCallCounter = { count: 0 };
+globalThis.__mcpCallCounter = globalThis.__mcpCallCounter || { count: 0 };
 async function __mcpCall(namespace, args) {
-  const id = __mcpCallCounter.count++;
+  const id = globalThis.__mcpCallCounter.count++;
   const placeholder = \`<<MCP_CALL_\${namespace}_\${id}>>\`;
   return __mcpResults[placeholder];
 }
