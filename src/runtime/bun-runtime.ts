@@ -271,12 +271,17 @@ __originalConsole.log('__RESULT__', JSON.stringify({
       const lines = trimmedCode.split('\n');
       const lastLine = lines[lines.length - 1].trim();
 
-      // Check if code already contains a return statement
+      // Check if code already contains a TOP-LEVEL return statement
       // (avoid wrapping multi-line returns like: return { ... };)
-      const hasReturnStatement = trimmedCode.includes('return ');
+      // NOTE: Don't just check for 'return' anywhere - it might be inside a function!
+      // Simple heuristic: check if last 3 lines contain a return statement
+      const hasTopLevelReturn = lines.some((line, idx) => {
+        if (idx < lines.length - 3) return false; // Only check last few lines
+        return line.trim().startsWith('return ');
+      });
 
-      // If code already has a return statement, don't modify it
-      if (hasReturnStatement) {
+      // If code already has a top-level return statement, don't modify it
+      if (hasTopLevelReturn) {
         wrappedCode = trimmedCode;
       } else {
         // Check if last line is a bare expression that should become a return
