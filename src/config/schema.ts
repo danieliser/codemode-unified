@@ -72,7 +72,7 @@ export const SecurityConfigSchema = z.object({
 
 // Sandbox configuration schema
 export const SandboxConfigSchema = z.object({
-  runtime: z.enum(['quickjs', 'deno', 'isolated-vm']).default('quickjs'),
+  runtime: z.enum(['quickjs', 'bun', 'deno', 'isolated-vm', 'e2b']).default('quickjs'),
   workers: z.object({
     min: z.number().default(2),
     max: z.number().default(8),

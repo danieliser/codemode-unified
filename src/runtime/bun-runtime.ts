@@ -201,6 +201,66 @@ export class BunRuntime extends BaseRuntime {
     // Trim the code
     const trimmedCode = code.trim();
 
+    // Check if code is already wrapped by the executor
+    const isExecutorWrapped = trimmedCode.includes('// Code Mode Unified - Sandbox Runtime') ||
+                             trimmedCode.includes('globalThis._executionState') ||
+                             trimmedCode.includes('globalThis._logs');
+
+    if (isExecutorWrapped) {
+      // Code is already wrapped by executor
+      // The executor evaluates expressions as last statement (e.g., "_result;")
+      // We need to convert that to an explicit return
+
+      // Find the last non-empty line and if it's just a variable/expression, add return
+      const lines = trimmedCode.split('\n');
+      let lastNonEmptyIndex = lines.length - 1;
+      while (lastNonEmptyIndex >= 0 && !lines[lastNonEmptyIndex].trim()) {
+        lastNonEmptyIndex--;
+      }
+
+      if (lastNonEmptyIndex >= 0) {
+        const lastLine = lines[lastNonEmptyIndex].trim();
+        // Check if last line is just an identifier or expression (not a statement)
+        if (lastLine &&
+            !lastLine.startsWith('return ') &&
+            !lastLine.endsWith(';') &&
+            !lastLine.endsWith('}') &&
+            !lastLine.startsWith('if ') &&
+            !lastLine.startsWith('for ') &&
+            !lastLine.startsWith('while ') &&
+            !lastLine.startsWith('const ') &&
+            !lastLine.startsWith('let ') &&
+            !lastLine.startsWith('var ')) {
+          // Convert last expression to return statement
+          lines[lastNonEmptyIndex] = `return ${lastLine};`;
+        }
+      }
+
+      const modifiedCode = lines.join('\n');
+
+      return `
+let __result;
+let __logs = [];
+
+try {
+  __result = await (async function() {
+    ${modifiedCode}
+  })();
+  __logs = globalThis._logs || [];
+} catch (error) {
+  console.error('EXECUTION_ERROR:', error.message);
+  console.error(error.stack);
+  process.exit(1);
+}
+
+console.log('__RESULT__', JSON.stringify({
+  result: __result,
+  logs: __logs
+}));
+`;
+    }
+
+    // Not executor-wrapped - apply our own wrapping
     // Check if code is a simple expression (doesn't contain statements)
     const isExpression = !trimmedCode.includes(';') &&
                         !trimmedCode.startsWith('var ') &&
@@ -292,6 +352,14 @@ console.log('__RESULT__', JSON.stringify({
       const proc = spawn(this.bunPath, args);
       let stdout = '';
       let stderr = '';
+      let resolved = false;
+
+      const cleanup = () => {
+        resolved = true;
+        proc.removeAllListeners();
+        proc.stdout?.removeAllListeners();
+        proc.stderr?.removeAllListeners();
+      };
 
       proc.stdout.on('data', (data) => {
         stdout += data.toString();
@@ -302,6 +370,9 @@ console.log('__RESULT__', JSON.stringify({
       });
 
       proc.on('close', (code) => {
+        if (resolved) return;
+        cleanup();
+
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
@@ -309,11 +380,23 @@ console.log('__RESULT__', JSON.stringify({
         }
       });
 
-      proc.on('error', reject);
+      proc.on('error', (error) => {
+        if (resolved) return;
+        cleanup();
+        reject(error);
+      });
 
       if (options?.timeout) {
         setTimeout(() => {
-          proc.kill();
+          if (resolved) return;
+          cleanup();
+          proc.kill('SIGTERM');
+          // Give it a moment to terminate gracefully
+          setTimeout(() => {
+            if (!proc.killed) {
+              proc.kill('SIGKILL');
+            }
+          }, 100);
           reject(new Error('Bun execution timeout'));
         }, options.timeout);
       }
