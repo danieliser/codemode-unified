@@ -231,9 +231,10 @@ function loadMCPConfig(): MCPConfig | null {
     const configPath = process.env.MCP_CONFIG_PATH;
 
     if (configPath) {
+      console.log(`📂 [CONFIG] Loading MCP config from explicit path: ${configPath}`);
       const content = readFileSync(configPath, 'utf-8');
       const config = JSON.parse(content);
-      console.log(`✅ Loaded MCP config from: ${configPath}`);
+      console.log(`✅ [CONFIG] Loaded MCP config from: ${configPath}`);
       return convertMCPJsonToConfig(config);
     }
 
@@ -245,11 +246,13 @@ function loadMCPConfig(): MCPConfig | null {
     const serviceMcpPath = join(serviceDir, '.mcp.json');
 
     try {
+      console.log(`📂 [CONFIG] Checking service directory for .mcp.json: ${serviceMcpPath}`);
       const content = readFileSync(serviceMcpPath, 'utf-8');
       const config = JSON.parse(content);
-      console.log(`✅ Loaded MCP config from service directory: ${serviceMcpPath}`);
+      console.log(`✅ [CONFIG] Loaded MCP config from service directory: ${serviceMcpPath}`);
       return convertMCPJsonToConfig(config);
-    } catch {
+    } catch (error) {
+      console.log(`ℹ️  [CONFIG] No .mcp.json found in service directory: ${serviceMcpPath}`);
       // Service directory config not found - run in standalone mode
     }
 
@@ -268,22 +271,23 @@ function loadMCPConfig(): MCPConfig | null {
 function convertMCPJsonToConfig(json: any): MCPConfig {
   const servers: Record<string, any> = {};
 
+  console.log(`📋 [CONFIG] MCP Config loaded with ${Object.keys(json.mcpServers || {}).length} servers`);
+  console.log(`📋 [CONFIG] Server names: ${Object.keys(json.mcpServers || {}).join(', ')}`);
+
   if (json.mcpServers) {
     for (const [name, config] of Object.entries(json.mcpServers as Record<string, any>)) {
       // Skip the codemode server (that's us!)
       if (name === 'codemode' || name === 'codemode-unified') {
+        console.log(`⏭️  [CONVERTER] Skipping self: ${name}`);
         continue;
       }
 
       // Debug logging for config conversion
       console.log(`🔍 [CONVERTER] Processing server: ${name}`);
-      console.log(`🔍 [CONVERTER] Raw config.env keys:`, Object.keys(config.env || {}));
-      console.log(`🔍 [CONVERTER] Raw config.env values (first 20 chars):`,
-        Object.entries(config.env || {}).reduce((acc, [k, v]) => {
-          acc[k] = typeof v === 'string' ? v.substring(0, 20) + '...' : v;
-          return acc;
-        }, {} as Record<string, any>)
-      );
+      console.log(`   Command: ${config.command}`);
+      console.log(`   Args: ${JSON.stringify(config.args || [])}`);
+      console.log(`   Transport: ${config.transport || config.type || 'stdio'}`);
+      console.log(`   Env keys: ${Object.keys(config.env || {}).join(', ')}`);
 
       servers[name] = {
         name,
@@ -526,7 +530,7 @@ function generateToolDefinitions(): Tool[] {
     executeCodeDescription += '\n\nFor complete TypeScript type definitions, read the resource mcp://types/declarations.';
   } else if (mcpManager) {
     // On-demand mode: Just mention the resource
-    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()). For TypeScript type definitions and API documentation of available MCP tools, read the resource mcp://types/declarations before writing code.';
+    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()).\n\n**IMPORTANT**: You MUST read the resource mcp://types/declarations before writing any code that uses MCP tools. This resource contains complete TypeScript type definitions, parameter schemas, and API documentation for all available MCP tools. Reading this resource ensures type-safe code generation and proper API usage.';
   }
 
   return [
@@ -600,7 +604,9 @@ function generateToolDefinitions(): Tool[] {
 const server = new Server(
   {
     name: SERVER_NAME,
-    version: SERVER_VERSION,
+    version: SERVER_VERSION
+  },
+  {
     capabilities: {
       tools: {},
       resources: {},
@@ -1369,10 +1375,27 @@ async function main() {
     // Generate TypeScript declarations after MCP servers are connected
     if (mcpManager) {
       try {
-        console.error('🔧 Generating TypeScript declarations for MCP tools...');
-        const codegenService = new CodeGenService(mcpManager);
-        const outputPath = await codegenService.generateDeclarations();
-        console.error(`✅ TypeScript declarations generated: ${outputPath}`);
+        console.error('🔧 Checking TypeScript declarations for MCP tools...');
+
+        // Parse copy destinations from environment variable
+        const copyToPaths = process.env.CODEMODE_TYPE_COPY_PATH
+          ? process.env.CODEMODE_TYPE_COPY_PATH.split(',').map(p => p.trim())
+          : undefined;
+
+        const codegenService = new CodeGenService(mcpManager, {
+          copyToPath: copyToPaths
+        });
+
+        // Check if regeneration is needed based on checksum
+        const needsRegen = await codegenService.needsRegeneration();
+
+        if (needsRegen) {
+          console.error('🔄 Tool list changed - regenerating TypeScript declarations...');
+          const outputPath = await codegenService.generateDeclarations();
+          console.error(`✅ TypeScript declarations generated: ${outputPath}`);
+        } else {
+          console.error('✅ TypeScript declarations up to date (checksum match)');
+        }
       } catch (error) {
         console.error('⚠️  Failed to generate TypeScript declarations:', error);
         console.error('   MCP tools will still work, but without IDE autocomplete');

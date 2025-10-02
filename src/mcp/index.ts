@@ -83,6 +83,28 @@ export class MCPManager {
     return this.runtimeAPI;
   }
 
+  /**
+   * Get current checksum of MCP tool list
+   * Used to detect if tools have changed and types need regeneration
+   */
+  getToolsChecksum(): string {
+    return this.aggregator.getToolsChecksum();
+  }
+
+  /**
+   * Check if MCP tools have changed since last checksum update
+   */
+  hasToolsChanged(): boolean {
+    return this.aggregator.hasToolsChanged();
+  }
+
+  /**
+   * Update stored checksum to current tool list
+   */
+  updateToolsChecksum(): void {
+    this.aggregator.updateToolsChecksum();
+  }
+
   // Generate TypeScript definitions for the current tool registry
   generateTypeDefinitions(): string {
     if (!this.unifiedAPI) {

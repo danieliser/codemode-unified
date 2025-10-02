@@ -27,6 +27,8 @@ import { DeclarationGenerator } from './declaration-generator.js';
 export interface CodeGenOptions {
   /** Output path for generated .d.ts file (default: ./generated/mcp.d.ts) */
   outputPath?: string;
+  /** Optional additional output paths to copy generated types to */
+  copyToPath?: string | string[];
 }
 
 /**
@@ -57,18 +59,73 @@ export interface CodeGenOptions {
  */
 export class CodeGenService {
   private outputPath: string;
+  private checksumPath: string;
+  private copyToPaths: string[];
+  private cachedChecksum: string = '';
 
   /**
    * Create code generation service
    *
    * @param mcpManager - Initialized MCP Manager with connected servers
-   * @param options - Optional configuration (output path, etc.)
+   * @param options - Optional configuration (output path, copy destinations, etc.)
    */
   constructor(
     private mcpManager: MCPManager,
     options: CodeGenOptions = {}
   ) {
     this.outputPath = options.outputPath || './generated/mcp.d.ts';
+    this.checksumPath = this.outputPath + '.checksum';
+
+    // Normalize copyToPath to array
+    this.copyToPaths = options.copyToPath
+      ? Array.isArray(options.copyToPath)
+        ? options.copyToPath
+        : [options.copyToPath]
+      : [];
+  }
+
+  /**
+   * Load cached checksum from file
+   */
+  private async loadCachedChecksum(): Promise<string> {
+    try {
+      const checksum = await fs.readFile(this.checksumPath, 'utf-8');
+      return checksum.trim();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Save checksum to file
+   */
+  private async saveCachedChecksum(checksum: string): Promise<void> {
+    try {
+      await fs.writeFile(this.checksumPath, checksum, 'utf-8');
+    } catch (error) {
+      console.warn('⚠️  Failed to save checksum file:', error);
+    }
+  }
+
+  /**
+   * Check if type regeneration is needed based on checksum comparison
+   * @returns true if types need to be regenerated
+   */
+  async needsRegeneration(): Promise<boolean> {
+    const currentChecksum = this.mcpManager.getToolsChecksum();
+    const cachedChecksum = await this.loadCachedChecksum();
+
+    const needsRegen = currentChecksum !== cachedChecksum;
+
+    if (needsRegen) {
+      console.log('🔄 MCP tools changed - regeneration needed');
+      console.log(`   Cached: ${cachedChecksum || '(none)'}`);
+      console.log(`   Current: ${currentChecksum}`);
+    } else {
+      console.log('✅ MCP tools unchanged - using cached types');
+    }
+
+    return needsRegen;
   }
 
   /**
@@ -129,10 +186,17 @@ export class CodeGenService {
         declarationFile.content
       );
 
+      // Step 5: Save checksum for future validation
+      console.log('\n🔐 Step 5: Saving Checksum');
+      const currentChecksum = this.mcpManager.getToolsChecksum();
+      await this.saveCachedChecksum(currentChecksum);
+      console.log(`   Checksum: ${currentChecksum}`);
+
       console.log('\n✅ Code generation complete!');
       console.log('   File: ' + declarationFile.path);
       console.log('   Size: ' + declarationFile.content.length + ' bytes');
       console.log('   Tools: ' + schemas.length);
+      console.log('   Checksum: ' + currentChecksum);
 
       return declarationFile.path;
     } catch (error) {
@@ -167,6 +231,29 @@ export class CodeGenService {
       await fs.writeFile(filePath, content, 'utf-8');
 
       console.log('   ✅ Successfully wrote ' + filePath);
+
+      // Copy to additional paths if configured
+      if (this.copyToPaths.length > 0) {
+        const absoluteFilePath = await fs.realpath(filePath);
+
+        for (const copyPath of this.copyToPaths) {
+          try {
+            const absoluteCopyPath = await fs.realpath(copyPath).catch(() => null);
+
+            // Only copy if paths are different (after resolving)
+            if (!absoluteCopyPath || absoluteFilePath !== absoluteCopyPath) {
+              const copyDir = dirname(copyPath);
+              await fs.mkdir(copyDir, { recursive: true });
+              await fs.writeFile(copyPath, content, 'utf-8');
+              console.log('   ✅ Copied to: ' + copyPath);
+            } else {
+              console.log('   ⏭️  Skipped copy (same as output): ' + copyPath);
+            }
+          } catch (copyError) {
+            console.warn('   ⚠️  Failed to copy to ' + copyPath + ':', copyError);
+          }
+        }
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       throw new Error('Failed to write declaration file: ' + errorMsg);

@@ -27,6 +27,7 @@ export class MCPAggregator extends EventEmitter {
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private readonly maxRetries = 3;
   private readonly reconnectDelay = 5000;
+  private toolsChecksum: string = '';
 
   constructor() {
     super();
@@ -36,6 +37,59 @@ export class MCPAggregator extends EventEmitter {
       namespaces: new Map(),
       lastUpdated: new Date()
     };
+  }
+
+  /**
+   * Calculate checksum of current tool list
+   * Used to detect changes in available MCP tools
+   */
+  private calculateToolsChecksum(): string {
+    const tools = Array.from(this.registry.tools.values());
+
+    // Create deterministic string from tool namespaces and schemas
+    const toolSignature = tools
+      .map(t => `${t.namespace}:${JSON.stringify(t.inputSchema)}`)
+      .sort()
+      .join('|');
+
+    // Simple hash function (FNV-1a)
+    let hash = 2166136261;
+    for (let i = 0; i < toolSignature.length; i++) {
+      hash ^= toolSignature.charCodeAt(i);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+
+    return (hash >>> 0).toString(16);
+  }
+
+  /**
+   * Get current tools checksum
+   */
+  getToolsChecksum(): string {
+    return this.toolsChecksum;
+  }
+
+  /**
+   * Check if tool list has changed since last checksum
+   */
+  hasToolsChanged(): boolean {
+    const currentChecksum = this.calculateToolsChecksum();
+    const changed = currentChecksum !== this.toolsChecksum;
+
+    if (changed) {
+      console.log(`🔄 Tool list changed - old: ${this.toolsChecksum}, new: ${currentChecksum}`);
+    }
+
+    return changed;
+  }
+
+  /**
+   * Update stored checksum to current tool list
+   */
+  updateToolsChecksum(): void {
+    const newChecksum = this.calculateToolsChecksum();
+    console.log(`✅ Updated tools checksum: ${newChecksum}`);
+    this.toolsChecksum = newChecksum;
   }
 
   async initialize(serverConfigs: Record<string, MCPServerConfig>): Promise<void> {
@@ -50,6 +104,9 @@ export class MCPAggregator extends EventEmitter {
 
     // Start health monitoring
     this.startHealthMonitoring();
+
+    // Calculate and store initial checksum
+    this.updateToolsChecksum();
 
     console.log(`✅ MCP Aggregator initialized with ${this.connections.size} connections`);
   }
