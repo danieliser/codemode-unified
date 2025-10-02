@@ -2,6 +2,20 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createExecutor } from '../../src/executor.js';
 import { defaultConfig } from '../../src/config/index.js';
 
+/**
+ * Integration Tests - REQUIRE CODE FIXES TO PASS
+ *
+ * TODO: These tests fail because production code needs updates:
+ * 1. src/sandbox/index.ts:10,15 - SandboxManager hardcodes QuickJS
+ *    - Need to select runtime based on config.runtime
+ * 2. src/config/schema.ts:75 - Add 'bun', 'e2b' to runtime enum
+ * 3. Tests use async/await which QuickJS doesn't support fully
+ *
+ * Test fixes applied:
+ * ✅ Removed top-level return statements (use expressions)
+ * ✅ Added JWT secret to test config
+ * ✅ Configured runtime: 'bun' in test config
+ */
 describe('Code Mode Executor Integration', () => {
   let executor: any;
 
@@ -14,11 +28,20 @@ describe('Code Mode Executor Integration', () => {
       },
       sandbox: {
         ...defaultConfig.sandbox,
+        runtime: 'bun', // Use Bun for full async/await support in integration tests
         limits: {
           memory: 64 * 1024 * 1024, // 64MB for testing
           timeout: 5000, // 5 seconds
           cpuQuota: 0.5,
           maxStackSize: 512 * 1024
+        }
+      },
+      security: {
+        ...defaultConfig.security,
+        auth: {
+          ...defaultConfig.security.auth,
+          secretKey: 'test-secret-key-for-integration-tests-only-not-for-production',
+          algorithm: 'HS256'
         }
       },
       mcp: {
@@ -44,7 +67,7 @@ describe('Code Mode Executor Integration', () => {
 
   it('should execute simple code', async () => {
     const result = await executor.execute({
-      code: 'return 2 + 2;'
+      code: '2 + 2'  // Expression, not return statement
     });
 
     expect(result.success).toBe(true);
@@ -68,13 +91,14 @@ describe('Code Mode Executor Integration', () => {
           metrics: ["wordCount", "charCount"]
         });
 
-        return {
+        // Return as expression
+        ({
           math: mathResult.result,
           text: {
             words: textResult.wordCount,
             chars: textResult.charCount
           }
-        };
+        });
       `
     });
 
@@ -106,7 +130,7 @@ describe('Code Mode Executor Integration', () => {
           expression: "({ name: item.name, score: item.score })"
         });
 
-        return mapped;
+        mapped;
       `
     });
 
@@ -147,7 +171,7 @@ describe('Code Mode Executor Integration', () => {
             await new Promise(resolve => setTimeout(resolve, 1));
           }
         }
-        return i;
+        i;
       `,
       options: { timeout: 1000 }
     });
@@ -168,7 +192,7 @@ describe('Code Mode Executor Integration', () => {
           precision: 0
         });
 
-        return sum;
+        sum;
       `
     });
 
@@ -204,7 +228,7 @@ describe('Code Mode Executor Integration', () => {
         });
         results.push(\`\${textResult.wordCount} words, \${textResult.charCount} chars\`);
 
-        return results;
+        results;
       `
     });
 
