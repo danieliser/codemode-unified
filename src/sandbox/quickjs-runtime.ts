@@ -374,6 +374,10 @@ export class QuickJSSandbox {
     this.cleanupInterval = setInterval(() => {
       this.cleanupIdleWorkers();
     }, this.idleTimeout / 2);
+    // Prevent interval from keeping process alive during test cleanup
+    if (this.cleanupInterval.unref) {
+      this.cleanupInterval.unref();
+    }
   }
 
   private cleanupIdleWorkers(): void {
