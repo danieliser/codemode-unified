@@ -208,39 +208,29 @@ export class BunRuntime extends BaseRuntime {
 
     if (isExecutorWrapped) {
       // Code is already wrapped by executor
-      // The executor evaluates expressions as last statement (e.g., "_result;")
-      // We need to convert that to an explicit return
+      // The executor evaluates expressions as last statement (e.g., "_result;") inside try-catch
+      // We need to find that expression and convert it to a return statement
 
-      // Find the last non-empty line and if it's just a variable/expression, add return
-      const lines = trimmedCode.split('\n');
-      let lastNonEmptyIndex = lines.length - 1;
-      while (lastNonEmptyIndex >= 0 && !lines[lastNonEmptyIndex].trim()) {
-        lastNonEmptyIndex--;
-      }
-
-      if (lastNonEmptyIndex >= 0) {
-        const lastLine = lines[lastNonEmptyIndex].trim();
-        // Check if last line is just an identifier or expression (not a statement)
-        if (lastLine &&
-            !lastLine.startsWith('return ') &&
-            !lastLine.endsWith(';') &&
-            !lastLine.endsWith('}') &&
-            !lastLine.startsWith('if ') &&
-            !lastLine.startsWith('for ') &&
-            !lastLine.startsWith('while ') &&
-            !lastLine.startsWith('const ') &&
-            !lastLine.startsWith('let ') &&
-            !lastLine.startsWith('var ')) {
-          // Convert last expression to return statement
-          lines[lastNonEmptyIndex] = `return ${lastLine};`;
+      // Look for pattern: "_result;" or similar identifier followed by semicolon
+      // This appears before the closing brace of the try block
+      let matchFound = false;
+      const modifiedCode = trimmedCode.replace(
+        /(\s+)(_result);/g,
+        (match, whitespace, varName) => {
+          matchFound = true;
+          return `${whitespace}return ${varName};`;
         }
-      }
+      );
 
-      const modifiedCode = lines.join('\n');
-
-      return `
+      const finalWrappedCode = `
 let __result;
 let __logs = [];
+
+// Save original console before executor overrides it
+const __originalConsole = {
+  log: console.log,
+  error: console.error
+};
 
 try {
   __result = await (async function() {
@@ -248,16 +238,19 @@ try {
   })();
   __logs = globalThis._logs || [];
 } catch (error) {
-  console.error('EXECUTION_ERROR:', error.message);
-  console.error(error.stack);
+  __originalConsole.error('EXECUTION_ERROR:', error.message);
+  __originalConsole.error(error.stack);
   process.exit(1);
 }
 
-console.log('__RESULT__', JSON.stringify({
+// Use original console to output result (executor's console captures logs)
+__originalConsole.log('__RESULT__', JSON.stringify({
   result: __result,
   logs: __logs
 }));
 `;
+
+      return finalWrappedCode;
     }
 
     // Not executor-wrapped - apply our own wrapping
