@@ -18,6 +18,7 @@ export interface MCPConnection {
   lastSeen: Date;
   tools: Map<string, ToolInfo>;
   retryCount: number;
+  reconnectTimer?: NodeJS.Timeout;
 }
 
 export class MCPAggregator extends EventEmitter {
@@ -396,11 +397,17 @@ export class MCPAggregator extends EventEmitter {
 
     console.log(`⏳ Scheduling reconnect for ${serverName} in ${delay}ms (attempt ${connection.retryCount}/${this.maxRetries})`);
 
-    setTimeout(async () => {
+    // Clear any existing reconnect timer
+    if (connection.reconnectTimer) {
+      clearTimeout(connection.reconnectTimer);
+    }
+
+    connection.reconnectTimer = setTimeout(async () => {
       if (connection.status === 'error') {
         console.log(`🔄 Retrying connection to ${serverName}...`);
         await this.connectServer(serverName, connection.config);
       }
+      connection.reconnectTimer = undefined;
     }, delay);
   }
 
@@ -437,6 +444,14 @@ export class MCPAggregator extends EventEmitter {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+
+    // Clear all reconnect timers
+    for (const connection of this.connections.values()) {
+      if (connection.reconnectTimer) {
+        clearTimeout(connection.reconnectTimer);
+        connection.reconnectTimer = undefined;
+      }
     }
 
     // Close all connections

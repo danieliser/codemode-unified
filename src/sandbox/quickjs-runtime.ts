@@ -144,16 +144,19 @@ export class QuickJSSandbox {
 
   private async waitForWorker(): Promise<SandboxWorker> {
     return new Promise((resolve, reject) => {
+      let checkTimer: NodeJS.Timeout | null = null;
       const timeout = setTimeout(() => {
+        if (checkTimer) clearTimeout(checkTimer);
         reject(new Error('Timeout waiting for available worker'));
       }, 5000);
 
       const checkForWorker = () => {
         if (this.workerQueue.length > 0) {
+          if (checkTimer) clearTimeout(checkTimer);
           clearTimeout(timeout);
           resolve(this.acquireWorker());
         } else {
-          setTimeout(checkForWorker, 10);
+          checkTimer = setTimeout(checkForWorker, 10);
         }
       };
 
@@ -225,6 +228,7 @@ export class QuickJSSandbox {
         if (result.error) {
           const error = context.getString(result.error);
           result.error.dispose();
+          clearTimeout(timeoutId);
           reject(new Error(error));
         } else if ('value' in result) {
           const value = result.value;
