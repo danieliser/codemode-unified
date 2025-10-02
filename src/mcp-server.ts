@@ -11,6 +11,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
   type Tool
 } from '@modelcontextprotocol/sdk/types.js';
 import { RuntimeFactory, RuntimeType } from './runtime/base-runtime.js';
@@ -27,6 +31,9 @@ import { fileURLToPath } from 'url';
 const SERVER_NAME = 'codemode-unified';
 const SERVER_VERSION = '0.1.0';
 
+// Configuration from environment
+const TYPE_EXPOSURE_MODE = process.env.CODEMODE_TYPE_EXPOSURE || 'on-demand'; // 'on-demand' | 'auto-include'
+
 // Runtime cache to avoid re-initialization
 const runtimeCache = new Map<RuntimeType, BaseRuntime>();
 
@@ -34,35 +41,184 @@ const runtimeCache = new Map<RuntimeType, BaseRuntime>();
 let mcpManager: MCPManager | null = null;
 
 /**
- * Parse structured text responses into JSON objects
- * Attempts to extract key-value pairs from formatted text
- * Returns object with both parsed fields AND original text for flexibility
+ * Response helper methods exposed to agents for custom parsing
  */
-function parseStructuredText(text: string): any {
-  // If it's already a simple value, return as-is
-  if (!text.includes('\n') && !text.includes(':')) {
-    return text;
+interface MCPResponseHelpers {
+  parseAsStructured(): any;
+  parseAsArray(): any[];
+  parseAsKeyValue(): Record<string, any>;
+  getRawText(): string;
+}
+
+/**
+ * Enhanced MCP tool response with raw content + convenience fields + helpers
+ */
+interface EnhancedMCPResponse {
+  content: any[];           // Raw MCP content array (spec-compliant)
+  text: string;             // Combined text from all text content
+  parsed: any | null;       // Auto-parsed structure (or null if unparseable)
+  helpers: MCPResponseHelpers;  // Utility methods for custom parsing
+  isError?: boolean;
+}
+
+/**
+ * Create helper methods bound to a specific text response
+ */
+function createResponseHelpers(text: string): MCPResponseHelpers {
+  return {
+    parseAsStructured(): any {
+      // Extract key-value pairs from formatted text
+      const result: any = {};
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const match = line.match(/^([A-Z][A-Za-z\s]+?):\s*(.+)$/);
+        if (match) {
+          const [, key, value] = match;
+          const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
+          result[normalizedKey] = value;
+        }
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
+    },
+
+    parseAsArray(): any[] {
+      // Extract numbered list items with multi-line metadata
+      // Format: "1. Content...\n   Key: Value\n   Key2: Value2"
+      const lines = text.split('\n');
+      const items: any[] = [];
+      let currentItem: any = null;
+
+      for (const line of lines) {
+        // Check for numbered list item start
+        const match = line.match(/^(\d+)\.\s+(.+)$/);
+        if (match) {
+          // Save previous item if exists
+          if (currentItem) {
+            items.push(currentItem);
+          }
+
+          // Start new item
+          const [, index, content] = match;
+          currentItem = {
+            index: parseInt(index),
+            content: content.trim()
+          };
+        } else if (currentItem && line.trim()) {
+          // Check for metadata fields (indented key-value pairs)
+          const metaMatch = line.match(/^\s+([A-Za-z\s]+):\s*(.+)$/);
+          if (metaMatch) {
+            const [, key, value] = metaMatch;
+            const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
+            currentItem[normalizedKey] = value.trim();
+          }
+        }
+      }
+
+      // Add last item
+      if (currentItem) {
+        items.push(currentItem);
+      }
+
+      return items.length > 0 ? items : [];
+    },
+
+    parseAsKeyValue(): Record<string, any> {
+      // Simple key:value extraction
+      const result: Record<string, any> = {};
+      const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          const key = line.substring(0, colonIndex).trim();
+          const value = line.substring(colonIndex + 1).trim();
+          result[key] = value;
+        }
+      }
+
+      return result;
+    },
+
+    getRawText(): string {
+      return text;
+    }
+  };
+}
+
+/**
+ * Auto-parse text content intelligently
+ * Returns parsed structure if detected, null otherwise
+ */
+function autoParseContent(text: string): any | null {
+  // 1. Try JSON parsing first
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Not JSON, continue
   }
 
-  // Try to extract key-value pairs from text
-  const result: any = { _text: text };
+  // 2. Check for key-value structure
+  const kvResult: any = {};
   const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+  let foundStructure = false;
 
-  // Extract single-line key-value pairs (e.g., "Memory ID: xyz")
-  let foundStructured = false;
   for (const line of lines) {
     const match = line.match(/^([A-Z][A-Za-z\s]+?):\s*(.+)$/);
     if (match) {
       const [, key, value] = match;
       const normalizedKey = key.toLowerCase().replace(/\s+/g, '_');
-      result[normalizedKey] = value;
-      foundStructured = true;
+      kvResult[normalizedKey] = value;
+      foundStructure = true;
     }
   }
 
-  // If we found structured data, return object with both parsed fields and original text
-  // Otherwise just return the original text string
-  return foundStructured ? result : text;
+  if (foundStructure) {
+    return kvResult;
+  }
+
+  // 3. Check for array structure (numbered lists with possible metadata)
+  const arrayMatch = text.match(/^\d+\.\s+/m);
+  if (arrayMatch) {
+    const textLines = text.split('\n');
+    const items: any[] = [];
+    let currentItem: any = null;
+
+    for (const line of textLines) {
+      const itemMatch = line.match(/^(\d+)\.\s+(.+)$/);
+      if (itemMatch) {
+        // Save previous item
+        if (currentItem) {
+          items.push(currentItem);
+        }
+        // Start new item
+        currentItem = {
+          index: parseInt(itemMatch[1]),
+          content: itemMatch[2].trim()
+        };
+      } else if (currentItem && line.trim()) {
+        // Check for indented metadata
+        const metaMatch = line.match(/^\s+([A-Za-z\s]+):\s*(.+)$/);
+        if (metaMatch) {
+          const normalizedKey = metaMatch[1].toLowerCase().replace(/\s+/g, '_');
+          currentItem[normalizedKey] = metaMatch[2].trim();
+        }
+      }
+    }
+
+    // Add last item
+    if (currentItem) {
+      items.push(currentItem);
+    }
+
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  // No structure detected
+  return null;
 }
 
 /**
@@ -134,7 +290,7 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
         transport: config.transport || config.type || 'stdio', // Try transport first, then type, then default to stdio
         command: config.command,
         args: config.args || [],
-        environment: config.env || {},
+        env: config.env || {},
         timeout: 30000,
         retryPolicy: {
           maxAttempts: 3,
@@ -144,7 +300,7 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
         }
       };
 
-      console.log(`🔍 [CONVERTER] Converted environment keys:`, Object.keys(servers[name].environment));
+      console.log(`🔍 [CONVERTER] Converted env keys:`, Object.keys(servers[name].env));
     }
   }
 
@@ -166,9 +322,85 @@ function convertMCPJsonToConfig(json: any): MCPConfig {
 }
 
 /**
+ * Load TypeScript declarations from generated file
+ */
+function loadTypeScriptDeclarations(): string {
+  try {
+    const { readFileSync, existsSync } = require('fs');
+    const { join } = require('path');
+    const declPath = join(__dirname, '../generated/mcp.d.ts');
+
+    if (existsSync(declPath)) {
+      return readFileSync(declPath, 'utf-8');
+    }
+  } catch (error) {
+    console.error('⚠️  Could not load TypeScript declarations:', error);
+  }
+  return '';
+}
+
+/**
+ * Generate a concise summary of available MCP tools for tool description
+ */
+function generateMCPToolSummary(): string {
+  if (!mcpManager) {
+    return '';
+  }
+
+  const tools = mcpManager.getAvailableTools();
+  if (tools.length === 0) {
+    return '';
+  }
+
+  // Group by namespace
+  const byNamespace = new Map<string, typeof tools>();
+  for (const tool of tools) {
+    const [namespace] = tool.namespace.split('.', 1);
+    if (!byNamespace.has(namespace)) {
+      byNamespace.set(namespace, []);
+    }
+    byNamespace.get(namespace)!.push(tool);
+  }
+
+  let summary = '\n\nAvailable MCP Tools:\n';
+
+  for (const [namespace, nsTools] of byNamespace.entries()) {
+    const safeNamespace = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(namespace)
+      ? `mcp.${namespace}`
+      : `mcp["${namespace}"]`;
+
+    summary += `\n${safeNamespace}:\n`;
+
+    for (const tool of nsTools) {
+      const toolName = tool.name.replace(`${namespace}_`, '').replace(`${namespace}-`, '');
+      const safeToolName = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(toolName)
+        ? toolName
+        : `"${toolName}"`;
+
+      // Get parameter names from schema
+      const params = tool.inputSchema?.properties
+        ? Object.keys(tool.inputSchema.properties).slice(0, 3).join(', ')
+        : 'args';
+
+      summary += `  - ${safeToolName}(${params}${tool.inputSchema?.properties && Object.keys(tool.inputSchema.properties).length > 3 ? ', ...' : ''})`;
+
+      if (tool.description) {
+        // Truncate description to first sentence
+        const shortDesc = tool.description.split('.')[0] + '.';
+        summary += ` // ${shortDesc.substring(0, 80)}${shortDesc.length > 80 ? '...' : ''}`;
+      }
+
+      summary += '\n';
+    }
+  }
+
+  return summary;
+}
+
+/**
  * Generate MCP proxy code to inject into sandbox
  */
-function generateMCPProxy(): string {
+function generateMCPProxy(includeTypes: boolean = false): string {
   if (!mcpManager) {
     return ''; // No MCP tools available
   }
@@ -181,6 +413,18 @@ function generateMCPProxy(): string {
   // Debug: Log available tools
   console.error('🔍 Available MCP tools:', tools.map(t => ({ name: t.name, namespace: t.namespace })));
 
+  let proxyCode = '';
+
+  // Prepend TypeScript declarations if requested
+  if (includeTypes) {
+    const typeDeclarations = loadTypeScriptDeclarations();
+    if (typeDeclarations) {
+      proxyCode += `// TypeScript declarations for MCP tools\n`;
+      proxyCode += `// @ts-ignore - declarations injected at runtime\n`;
+      proxyCode += typeDeclarations + '\n\n';
+    }
+  }
+
   // Group tools by namespace
   const byNamespace = new Map<string, typeof tools>();
   for (const tool of tools) {
@@ -192,7 +436,7 @@ function generateMCPProxy(): string {
   }
 
   // Generate proxy object
-  let proxyCode = 'const mcp = {\n';
+  proxyCode += 'const mcp = {\n';
 
   for (const [namespace, nsTools] of byNamespace.entries()) {
     // Quote namespace if it contains special characters (like hyphens)
@@ -263,12 +507,32 @@ async function getRuntime(type: RuntimeType): Promise<BaseRuntime> {
   return runtimeCache.get(type)!;
 }
 
-// Tool definitions
-const tools: Tool[] = [
-  {
-    name: 'execute_code',
-    description: 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities.',
-    inputSchema: {
+/**
+ * Generate tool definitions dynamically based on configuration
+ */
+function generateToolDefinitions(): Tool[] {
+  // Base description for execute_code
+  let executeCodeDescription = 'Execute JavaScript/TypeScript code in a sandboxed runtime environment. Supports multiple runtimes with different capabilities.';
+
+  // Add MCP tool information based on mode
+  if (mcpManager && TYPE_EXPOSURE_MODE === 'auto-include') {
+    // Auto-include mode: Add tool summary directly in description
+    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object.';
+    const toolSummary = generateMCPToolSummary();
+    if (toolSummary) {
+      executeCodeDescription += toolSummary;
+    }
+    executeCodeDescription += '\n\nFor complete TypeScript type definitions, read the resource mcp://types/declarations.';
+  } else if (mcpManager) {
+    // On-demand mode: Just mention the resource
+    executeCodeDescription += ' When MCP integration is enabled, code has access to MCP tools via the global `mcp` object (e.g., mcp.automem.store_memory(), mcp["sequential-thinking"].sequentialthinking()). For TypeScript type definitions and API documentation of available MCP tools, read the resource mcp://types/declarations before writing code.';
+  }
+
+  return [
+    {
+      name: 'execute_code',
+      description: executeCodeDescription,
+      inputSchema: {
       type: 'object',
       properties: {
         code: {
@@ -328,7 +592,8 @@ const tools: Tool[] = [
       required: ['runtime']
     }
   }
-];
+  ];
+}
 
 // Create MCP server
 const server = new Server(
@@ -336,13 +601,271 @@ const server = new Server(
     name: SERVER_NAME,
     version: SERVER_VERSION,
     capabilities: {
-      tools: {}
+      tools: {},
+      resources: {},
+      prompts: {}
     }
   }
 );
 
+// List available resources
+server.setRequestHandler(ListResourcesRequestSchema, async (_request) => {
+  // Only expose type declarations if MCP integration is enabled
+  if (!mcpManager) {
+    return { resources: [] };
+  }
+
+  return {
+    resources: [
+      {
+        uri: 'mcp://types/declarations',
+        name: 'MCP Tool Type Declarations',
+        description: 'TypeScript declarations for all available MCP tools. Use these types when writing code that calls MCP tools via the mcp.* proxy.',
+        mimeType: 'text/x-typescript'
+      }
+    ]
+  };
+});
+
+// Read resource content
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const { uri } = request.params;
+
+  if (uri === 'mcp://types/declarations') {
+    const declarations = loadTypeScriptDeclarations();
+
+    if (!declarations) {
+      throw new Error('Type declarations not available. Ensure MCP integration is enabled and declarations have been generated.');
+    }
+
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: 'text/x-typescript',
+          text: declarations
+        }
+      ]
+    };
+  }
+
+  throw new Error(`Unknown resource: ${uri}`);
+});
+
+// List available prompts
+server.setRequestHandler(ListPromptsRequestSchema, async (_request) => {
+  const prompts = [
+    {
+      name: 'mcp-tool-example',
+      description: 'Example code template for calling MCP tools with proper error handling',
+      arguments: [
+        {
+          name: 'tool_name',
+          description: 'The MCP tool to call (e.g., automem.store_memory)',
+          required: true
+        }
+      ]
+    },
+    {
+      name: 'async-handler',
+      description: 'Template for async code with proper error handling and logging',
+      arguments: []
+    },
+    {
+      name: 'mcp-batch-operations',
+      description: 'Template for batching multiple MCP tool calls efficiently',
+      arguments: []
+    }
+  ];
+
+  return { prompts };
+});
+
+// Get prompt content
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  switch (name) {
+    case 'mcp-tool-example': {
+      const toolName = args?.tool_name || 'automem.store_memory';
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Create example code for calling mcp.${toolName}(). Include proper error handling, type-safe arguments, and result processing.`
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `Here's a type-safe example for mcp.${toolName}():
+
+\`\`\`typescript
+try {
+  // Read types first for reference
+  // Resource: mcp://types/declarations
+
+  const result = await mcp.${toolName}({
+    // Add type-safe arguments here based on the TypeScript definitions
+    // Check mcp.d.ts for exact parameter types
+  });
+
+  console.log('Success:', result);
+  return result;
+} catch (error) {
+  console.error('MCP tool call failed:', error);
+  throw error;
+}
+\`\`\`
+
+Remember to:
+1. Read mcp://types/declarations resource for exact types
+2. Use proper TypeScript types for all arguments
+3. Handle errors appropriately
+4. Use the correct namespace (quote if hyphenated: mcp["server-name"])
+`
+            }
+          }
+        ]
+      };
+    }
+
+    case 'async-handler': {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: 'Create an async function template with error handling'
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `\`\`\`typescript
+async function handleOperation() {
+  const startTime = Date.now();
+
+  try {
+    console.log('Starting operation...');
+
+    // Your async operations here
+    const result = await someAsyncCall();
+
+    const duration = Date.now() - startTime;
+    console.log(\`Operation completed in \${duration}ms\`);
+
+    return {
+      success: true,
+      result,
+      duration
+    };
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(\`Operation failed after \${duration}ms:\`, error);
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      duration
+    };
+  }
+}
+
+// Execute and return
+return await handleOperation();
+\`\`\`
+`
+            }
+          }
+        ]
+      };
+    }
+
+    case 'mcp-batch-operations': {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: 'Create a template for batching multiple MCP tool calls'
+            }
+          },
+          {
+            role: 'assistant',
+            content: {
+              type: 'text',
+              text: `\`\`\`typescript
+async function batchMCPOperations() {
+  console.log('Starting batch operations...');
+
+  try {
+    // Execute MCP calls in parallel for better performance
+    const results = await Promise.allSettled([
+      mcp.automem.store_memory({
+        content: 'First memory',
+        tags: ['batch'],
+        importance: 0.8
+      }),
+      mcp.automem.store_memory({
+        content: 'Second memory',
+        tags: ['batch'],
+        importance: 0.7
+      }),
+      mcp["sequential-thinking"].sequentialthinking({
+        thought: 'Analyzing batch results',
+        nextThoughtNeeded: false,
+        thoughtNumber: 1,
+        totalThoughts: 1
+      })
+    ]);
+
+    // Process results
+    const successful = results.filter(r => r.status === 'fulfilled');
+    const failed = results.filter(r => r.status === 'rejected');
+
+    console.log(\`Batch complete: \${successful.length} succeeded, \${failed.length} failed\`);
+
+    return {
+      total: results.length,
+      successful: successful.length,
+      failed: failed.length,
+      results: results.map((r, i) => ({
+        index: i,
+        status: r.status,
+        value: r.status === 'fulfilled' ? r.value : undefined,
+        error: r.status === 'rejected' ? r.reason : undefined
+      }))
+    };
+  } catch (error) {
+    console.error('Batch operation failed:', error);
+    throw error;
+  }
+}
+
+return await batchMCPOperations();
+\`\`\`
+`
+            }
+          }
+        ]
+      };
+    }
+
+    default:
+      throw new Error(`Unknown prompt: ${name}`);
+  }
+});
+
 // List available tools
 server.setRequestHandler(ListToolsRequestSchema, async (_request) => {
+  const tools = generateToolDefinitions();
   return { tools };
 });
 
@@ -371,6 +894,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Check runtime capabilities
         const capabilities = rt.getCapabilities();
         const supportsAsync = capabilities.supportsAsync;
+        const supportsTypeScript = capabilities.supportsTypeScript;
 
         // Inject MCP proxy if available
         let enhancedCode = code;
@@ -389,8 +913,8 @@ async function __mcpCall(namespace, args) {
 }
 
 `;
-          // Generate and prepend MCP proxy
-          const mcpProxy = generateMCPProxy();
+          // Generate and prepend MCP proxy (with types for TypeScript-aware runtimes)
+          const mcpProxy = generateMCPProxy(supportsTypeScript);
           enhancedCode = mcpHandler + mcpProxy + code;
 
           // Debug: Log generated code structure to file AND stderr
@@ -448,39 +972,149 @@ ${enhancedCode.substring(0, 800)}
                   const result = await mcpManager.callTool(call.namespace, call.args);
 
                   // MCP responses have format: { content: [{type, text}], isError?: boolean }
-                  // Extract the actual result from the response
-                  let actualValue = result;
+                  // Build enhanced response with raw content + convenience fields + helpers
+                  let enhancedResponse: EnhancedMCPResponse;
+
                   if (result && result.content && Array.isArray(result.content)) {
-                    const textContent = result.content.find((c: any) => c.type === 'text')?.text;
-                    if (textContent) {
-                      try {
-                        // Try parsing as JSON first
-                        actualValue = JSON.parse(textContent);
-                      } catch {
-                        // Not JSON - try parsing structured text (works for any MCP server)
-                        actualValue = parseStructuredText(textContent);
-                      }
-                    }
+                    // Extract combined text from all text content
+                    const textParts = result.content
+                      .filter((c: any) => c.type === 'text')
+                      .map((c: any) => c.text);
+                    const combinedText = textParts.join('\n');
+
+                    // Create enhanced response
+                    enhancedResponse = {
+                      content: result.content,          // Raw MCP content array
+                      text: combinedText,               // Combined text
+                      parsed: autoParseContent(combinedText),  // Auto-parsed structure
+                      helpers: createResponseHelpers(combinedText),  // Helper methods
+                      isError: result.isError
+                    };
+                  } else {
+                    // Fallback for non-standard responses
+                    enhancedResponse = {
+                      content: [],
+                      text: String(result),
+                      parsed: result,
+                      helpers: createResponseHelpers(String(result)),
+                      isError: false
+                    };
                   }
 
                   return {
                     placeholder: call.placeholder,
-                    value: actualValue
+                    value: enhancedResponse
                   };
                 } catch (error) {
                   return {
                     placeholder: call.placeholder,
-                    value: { error: error instanceof Error ? error.message : String(error) }
+                    value: {
+                      content: [],
+                      text: error instanceof Error ? error.message : String(error),
+                      parsed: null,
+                      helpers: createResponseHelpers(error instanceof Error ? error.message : String(error)),
+                      isError: true
+                    }
                   };
                 }
               })
             );
 
-            // Create resolution code
+            // Create resolution code with helper function definitions
             let resolutionCode = '// MCP Call Resolutions\n';
+
+            // Inject helper function definitions into execution environment
+            resolutionCode += `
+// Helper functions for MCP response parsing
+function __createMCPHelpers(text) {
+  return {
+    parseAsStructured: function() {
+      const result = {};
+      const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const match = line.match(/^([A-Z][A-Za-z\\s]+?):\\s*(.+)$/);
+        if (match) {
+          const key = match[1].toLowerCase().replace(/\\s+/g, '_');
+          result[key] = match[2];
+        }
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
+    },
+
+    parseAsArray: function() {
+      const lines = text.split('\\n');
+      const items = [];
+      let currentItem = null;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Check for numbered list item start (e.g., "1. Content here...")
+        const match = line.match(/^(\\d+)\\.\\s+(.+)$/);
+        if (match) {
+          // Save previous item if exists
+          if (currentItem) {
+            items.push(currentItem);
+          }
+
+          // Start new item
+          const [, index, content] = match;
+          currentItem = {
+            index: parseInt(index),
+            content: content.trim()
+          };
+        } else if (currentItem && line.trim()) {
+          // Check for metadata fields (e.g., "   ID: xyz", "   Created: ...")
+          const metaMatch = line.match(/^\\s+([A-Za-z\\s]+):\\s*(.+)$/);
+          if (metaMatch) {
+            const [, key, value] = metaMatch;
+            const normalizedKey = key.toLowerCase().replace(/\\s+/g, '_');
+            currentItem[normalizedKey] = value.trim();
+          }
+        }
+      }
+
+      // Add last item
+      if (currentItem) {
+        items.push(currentItem);
+      }
+
+      return items.length > 0 ? items : [];
+    },
+
+    parseAsKeyValue: function() {
+      const result = {};
+      const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+      for (const line of lines) {
+        const colonIndex = line.indexOf(':');
+        if (colonIndex > 0) {
+          const key = line.substring(0, colonIndex).trim();
+          const value = line.substring(colonIndex + 1).trim();
+          result[key] = value;
+        }
+      }
+
+      return result;
+    },
+
+    getRawText: function() {
+      return text;
+    }
+  };
+}
+`;
+
+            // Store MCP results with serializable data + recreatable helpers
             resolutionCode += 'const __mcpResults = {};\n';
             for (const res of resolutions) {
-              resolutionCode += `__mcpResults['${res.placeholder}'] = ${JSON.stringify(res.value)};\n`;
+              // Serialize without the helpers (functions can't be JSON.stringified)
+              const { helpers, ...serializableValue } = res.value as any;
+              resolutionCode += `__mcpResults['${res.placeholder}'] = ${JSON.stringify(serializableValue)};\n`;
+              // Add helpers back using the injected function
+              resolutionCode += `__mcpResults['${res.placeholder}'].helpers = __createMCPHelpers(__mcpResults['${res.placeholder}'].text);\n`;
             }
 
             // Update __mcpCall to return actual results
@@ -724,9 +1358,25 @@ async function main() {
   // This prevents recursive spawning when codemode is itself an MCP server
   const enableMCPIntegration = process.env.CODEMODE_ENABLE_MCP_INTEGRATION === 'true';
 
+  // Import CodeGenService for TypeScript declaration generation
+  const { CodeGenService } = await import('./codegen/index.js');
+
   if (enableMCPIntegration) {
     console.error('🔌 MCP Integration enabled via CODEMODE_ENABLE_MCP_INTEGRATION');
     await initializeMCPManager();
+
+    // Generate TypeScript declarations after MCP servers are connected
+    if (mcpManager) {
+      try {
+        console.error('🔧 Generating TypeScript declarations for MCP tools...');
+        const codegenService = new CodeGenService(mcpManager);
+        const outputPath = await codegenService.generateDeclarations();
+        console.error(`✅ TypeScript declarations generated: ${outputPath}`);
+      } catch (error) {
+        console.error('⚠️  Failed to generate TypeScript declarations:', error);
+        console.error('   MCP tools will still work, but without IDE autocomplete');
+      }
+    }
   } else {
     console.error('📭 MCP Integration disabled (set CODEMODE_ENABLE_MCP_INTEGRATION=true to enable)');
     console.error('   Running in standalone mode - code execution only');
@@ -734,8 +1384,9 @@ async function main() {
   console.error('');
 
   console.error('Available tools:');
+  const tools = generateToolDefinitions();
   tools.forEach(tool => {
-    console.error(`   - ${tool.name}: ${tool.description}`);
+    console.error(`   - ${tool.name}: ${tool.description.substring(0, 100)}${tool.description.length > 100 ? '...' : ''}`);
   });
   console.error('');
   console.error('✅ Server ready and listening on stdio');

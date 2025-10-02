@@ -38,8 +38,9 @@ config.json
 **/.mcp.*.json
 !**/.mcp.example.json
 
-# Generated schemas
-generated/
+# Generated schemas (except example mcp.d.ts for documentation)
+generated/*
+!generated/mcp.d.ts
 
 # Temporary files
 tmp/
