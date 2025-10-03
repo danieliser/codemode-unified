@@ -126,3 +126,6 @@ audit-logs/
 ./test-*.ts
 debug-*.js
 debug-*.ts
+
+# Development/test server files
+simple-server.js

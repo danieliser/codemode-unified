@@ -102,7 +102,7 @@ Tool names with hyphens use bracket notation: `mcp['sequential-thinking']`
 
 1. **Start CodeMode Unified server**:
 ```bash
-cd /Users/danieliser/Projects/CompanyKit/services/codemode-unified
+cd /path/to/codemode-unified
 npm run dev
 ```
 

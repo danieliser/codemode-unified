@@ -154,7 +154,7 @@ return {
 curl -X POST http://localhost:3001/execute \
   -H "Content-Type: application/json" \
   -d '{
-    "code": "const result = await fetch(\"https://api.github.com/users/danieliser\").then(r => r.json()); return { username: result.login, repos: result.public_repos };",
+    "code": "const result = await fetch(\"https://api.github.com/users/octocat\").then(r => r.json()); return { username: result.login, repos: result.public_repos };",
     "runtime": "bun",
     "timeout": 10000
   }'
@@ -165,8 +165,8 @@ curl -X POST http://localhost:3001/execute \
 {
   "success": true,
   "result": {
-    "username": "danieliser",
-    "repos": 42
+    "username": "octocat",
+    "repos": 8
   },
   "stdout": "",
   "stderr": "",
